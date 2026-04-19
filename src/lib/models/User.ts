@@ -5,6 +5,10 @@ export interface IUser extends Document {
   name: string;
   image?: string;
   providerId: string;
+  /** Tldraw tool ids to show on the bottom hotbar (subset/order). Empty = all defaults. */
+  hotbarToolIds: string[];
+  /** Personal drive quota in bytes (default 5 GiB if unset). */
+  storageQuotaBytes?: number;
   createdAt: Date;
   updatedAt: Date;
 }
@@ -15,6 +19,8 @@ const UserSchema: Schema = new Schema(
     name: { type: String, required: true },
     image: { type: String },
     providerId: { type: String, required: true, unique: true },
+    hotbarToolIds: { type: [String], default: [] },
+    storageQuotaBytes: { type: Number },
   },
   { timestamps: true }
 );

@@ -2,11 +2,16 @@ import mongoose from "mongoose";
 
 const MONGODB_URI = process.env.MONGODB_URI || "mongodb://localhost:27017/tdraw";
 
-let cached = (global as any).mongoose;
+type MongooseCache = {
+  conn: typeof mongoose | null;
+  promise: Promise<typeof mongoose> | null;
+};
 
-if (!cached) {
-  cached = (global as any).mongoose = { conn: null, promise: null };
+const g = globalThis as typeof globalThis & { __tdrawMongoose?: MongooseCache };
+if (!g.__tdrawMongoose) {
+  g.__tdrawMongoose = { conn: null, promise: null };
 }
+const cached = g.__tdrawMongoose;
 
 async function dbConnect() {
   if (cached.conn) {

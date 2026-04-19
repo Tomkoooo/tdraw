@@ -12,6 +12,9 @@ const eslintConfig = defineConfig([
     "out/**",
     "build/**",
     "next-env.d.ts",
+    "server/prod.cjs",
+    "realtime/server.bundle.cjs",
+    "coverage/**",
   ]),
 ]);
 

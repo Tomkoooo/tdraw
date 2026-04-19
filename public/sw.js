@@ -1,11 +1,10 @@
-self.addEventListener('install', (event) => {
-  console.log('Service Worker installing.');
+self.addEventListener("install", () => {
+  self.skipWaiting();
 });
 
-self.addEventListener('activate', (event) => {
-  console.log('Service Worker activating.');
+self.addEventListener("activate", (event) => {
+  event.waitUntil(self.clients.claim());
 });
 
-self.addEventListener('fetch', (event) => {
-  // Offline-first PWA caching strategy to be implemented here
-});
+// Network-first app shell: extend with precache / runtime caching when you want offline canvas.
+self.addEventListener("fetch", () => {});

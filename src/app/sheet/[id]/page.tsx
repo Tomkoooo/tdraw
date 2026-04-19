@@ -1,10 +1,13 @@
 import { getSheet } from "@/lib/actions/sheet";
+import { getHotbarToolIds } from "@/lib/actions/settings";
 import { redirect } from "next/navigation";
 import TldrawEditor from "@/components/TldrawEditor";
+import { auth } from "@/auth";
 
 export default async function SheetPage({ params }: { params: Promise<{ id: string }> }) {
   const { id } = await params;
-  const sheet = await getSheet(id);
+  const session = await auth();
+  const [sheet, hotbarToolIds] = await Promise.all([getSheet(id), getHotbarToolIds()]);
 
   if (!sheet) {
     redirect("/dashboard");
@@ -16,6 +19,14 @@ export default async function SheetPage({ params }: { params: Promise<{ id: stri
       sheetId={sheet._id}
       initialData={sheet.canvasState}
       title={sheet.title}
+      canWrite={sheet.canWrite}
+      canTitle={sheet.canTitle}
+      contentVersion={sheet.contentVersion}
+      hotbarToolIds={hotbarToolIds}
+      userName={session?.user?.name ?? null}
+      userImage={session?.user?.image ?? null}
+      userId={session?.user?.id}
+      organizationId={sheet.organizationId}
     />
   );
 }

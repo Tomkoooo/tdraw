@@ -2,38 +2,226 @@
 
 import { auth } from "@/auth";
 import dbConnect from "@/lib/db/mongoose";
+import mongoose from "mongoose";
 import Sheet from "@/lib/models/Sheet";
+import SheetGrant from "@/lib/models/SheetGrant";
+import Folder from "@/lib/models/Folder";
+import Organization from "@/lib/models/Organization";
+import User from "@/lib/models/User";
 import { revalidatePath } from "next/cache";
+import { requireSheetPermission, getEffectiveSheetAccess } from "@/lib/authz/sheet";
+import { requireOrgMember, requireOrgAdmin } from "@/lib/authz/org";
+import { roleMeets } from "@/lib/authz/types";
 
-export async function createSheet() {
+/** Sheets not in trash (missing field counts as live for legacy docs). */
+const LIVE_SHEET = { $or: [{ deletedAt: null }, { deletedAt: { $exists: false } }] };
+
+/** Folders not in trash (same shape as `folder` actions). */
+const LIVE_FOLDER = { $or: [{ deletedAt: null }, { deletedAt: { $exists: false } }] };
+
+function approxStateBytes(canvasState: unknown): number {
+  try {
+    const s = typeof canvasState === "string" ? canvasState : JSON.stringify(canvasState ?? {});
+    return Buffer.byteLength(s, "utf8");
+  } catch {
+    return 0;
+  }
+}
+
+function mapDriveSheet(sheet: {
+  _id: unknown;
+  title?: string;
+  updatedAt?: Date;
+  createdAt?: Date;
+  previewImage?: string;
+  folderId?: unknown;
+  organizationId?: unknown;
+  userId?: unknown;
+  pinned?: boolean;
+  approxBytes?: number;
+}) {
+  return {
+    _id: String(sheet._id),
+    title: sheet.title ?? "Untitled Note",
+    updatedAt: sheet.updatedAt ? new Date(sheet.updatedAt).toISOString() : new Date().toISOString(),
+    createdAt: sheet.createdAt ? new Date(sheet.createdAt).toISOString() : new Date().toISOString(),
+    previewImage: sheet.previewImage || null,
+    folderId: sheet.folderId ? String(sheet.folderId) : null,
+    organizationId: sheet.organizationId ? String(sheet.organizationId) : null,
+    userId: sheet.userId ? String(sheet.userId) : undefined,
+    pinned: !!sheet.pinned,
+    approxBytes: typeof sheet.approxBytes === "number" ? sheet.approxBytes : 0,
+  };
+}
+
+export async function createSheet(opts?: { folderId?: string; organizationId?: string }) {
   const session = await auth();
   if (!session?.user?.id) throw new Error("Unauthorized");
 
   await dbConnect();
-  
+
+  let organizationId: mongoose.Types.ObjectId | undefined;
+  if (opts?.organizationId) {
+    await requireOrgMember(session.user.id, opts.organizationId);
+    organizationId = new mongoose.Types.ObjectId(opts.organizationId);
+  }
+
+  if (opts?.folderId) {
+    const folder = await Folder.findOne({ _id: opts.folderId, ...LIVE_FOLDER }).lean();
+    if (!folder) throw new Error("Folder not found");
+    if (organizationId) {
+      if (!folder.organizationId || String(folder.organizationId) !== String(organizationId)) {
+        throw new Error("Invalid folder");
+      }
+    } else {
+      if (!folder.ownerUserId || String(folder.ownerUserId) !== session.user.id) {
+        throw new Error("Invalid folder");
+      }
+    }
+  }
+
+  let maxSortQuery: Record<string, unknown>;
+  if (organizationId) {
+    const parts: Record<string, unknown>[] = [{ organizationId }, { ...LIVE_SHEET }];
+    if (opts?.folderId) {
+      parts.push({ folderId: new mongoose.Types.ObjectId(opts.folderId) });
+    } else {
+      parts.push({ $or: [{ folderId: null }, { folderId: { $exists: false } }] });
+    }
+    maxSortQuery = { $and: parts };
+  } else {
+    maxSortQuery = {
+      $and: [
+        { userId: new mongoose.Types.ObjectId(session.user.id) },
+        { $or: [{ organizationId: null }, { organizationId: { $exists: false } }] },
+        { ...LIVE_SHEET },
+        opts?.folderId
+          ? { folderId: new mongoose.Types.ObjectId(opts.folderId) }
+          : { $or: [{ folderId: null }, { folderId: { $exists: false } }] },
+      ],
+    };
+  }
+
+  const last = await Sheet.findOne(maxSortQuery).sort({ sortIndex: -1 }).select("sortIndex").lean();
+  const sortIndex = typeof last?.sortIndex === "number" ? last.sortIndex + 1 : 0;
+
   const newSheet = await Sheet.create({
     userId: session.user.id,
     title: "Untitled Note",
     canvasState: {},
+    folderId: opts?.folderId ? new mongoose.Types.ObjectId(opts.folderId) : undefined,
+    organizationId,
+    sortIndex,
   });
 
   revalidatePath("/dashboard");
   return newSheet._id.toString();
 }
 
-export async function getSheets() {
+export async function getMySheets() {
   const session = await auth();
   if (!session?.user?.id) throw new Error("Unauthorized");
 
   await dbConnect();
-  const sheets = await Sheet.find({ userId: session.user.id }).sort({ updatedAt: -1 }).lean();
-  
-  return sheets.map(sheet => ({
-    _id: sheet._id.toString(),
-    title: sheet.title,
-    updatedAt: sheet.updatedAt ? new Date(sheet.updatedAt).toISOString() : new Date().toISOString(),
-    previewImage: sheet.previewImage || null
+  const ownerId = new mongoose.Types.ObjectId(session.user.id);
+  const sheets = await Sheet.find({
+    userId: ownerId,
+    $and: [{ $or: [{ organizationId: null }, { organizationId: { $exists: false } }] }, LIVE_SHEET],
+  })
+    .sort({ pinned: -1, sortIndex: 1, updatedAt: -1 })
+    .lean();
+
+  return sheets.map(mapDriveSheet);
+}
+
+export async function getOrgSheets(organizationId: string) {
+  const session = await auth();
+  if (!session?.user?.id) throw new Error("Unauthorized");
+  await dbConnect();
+  await requireOrgMember(session.user.id, organizationId);
+
+  const sheets = await Sheet.find({
+    organizationId: new mongoose.Types.ObjectId(organizationId),
+    ...LIVE_SHEET,
+  })
+    .sort({ pinned: -1, sortIndex: 1, updatedAt: -1 })
+    .lean();
+
+  return sheets.map(mapDriveSheet);
+}
+
+export async function getSharedWithMeSheets() {
+  const session = await auth();
+  if (!session?.user?.id) throw new Error("Unauthorized");
+
+  await dbConnect();
+  const grants = await SheetGrant.find({
+    granteeUserId: new mongoose.Types.ObjectId(session.user.id),
+    via: "share",
+  }).lean();
+
+  const ids = grants.map((g) => g.sheetId);
+  if (ids.length === 0) return [];
+
+  const sheets = await Sheet.find({
+    _id: { $in: ids },
+    ...LIVE_SHEET,
+  })
+    .sort({ updatedAt: -1 })
+    .lean();
+  const roleBySheet = new Map(grants.map((g) => [String(g.sheetId), g.role]));
+
+  return sheets.map((sheet) => ({
+    ...mapDriveSheet(sheet),
+    role: roleBySheet.get(String(sheet._id)) ?? "reader",
   }));
+}
+
+/** Personal or org sheets you own that have at least one email-share grant. */
+export async function getSharedByMeSheets() {
+  const session = await auth();
+  if (!session?.user?.id) throw new Error("Unauthorized");
+  await dbConnect();
+
+  const mine = await Sheet.find({
+    userId: new mongoose.Types.ObjectId(session.user.id),
+    ...LIVE_SHEET,
+  })
+    .select("_id")
+    .lean();
+  const mineIds = mine.map((m) => m._id);
+  if (mineIds.length === 0) return [];
+
+  const sharedIds = await SheetGrant.distinct("sheetId", {
+    sheetId: { $in: mineIds },
+    via: "share",
+  });
+  if (!sharedIds.length) return [];
+
+  const sheets = await Sheet.find({ _id: { $in: sharedIds }, ...LIVE_SHEET }).sort({ updatedAt: -1 }).lean();
+  return sheets.map(mapDriveSheet);
+}
+
+export async function getTrashedSheets() {
+  const session = await auth();
+  if (!session?.user?.id) throw new Error("Unauthorized");
+  await dbConnect();
+
+  const sheets = await Sheet.find({
+    userId: new mongoose.Types.ObjectId(session.user.id),
+    /** `$ne: null` alone also matches missing fields; require a real trash timestamp. */
+    deletedAt: { $exists: true, $ne: null },
+    $or: [{ organizationId: null }, { organizationId: { $exists: false } }],
+  })
+    .sort({ deletedAt: -1 })
+    .lean();
+
+  return sheets.map(mapDriveSheet);
+}
+
+/** @deprecated use getMySheets — kept for incremental refactor */
+export async function getSheets() {
+  return getMySheets();
 }
 
 export async function getSheet(id: string) {
@@ -41,15 +229,33 @@ export async function getSheet(id: string) {
   if (!session?.user?.id) throw new Error("Unauthorized");
 
   await dbConnect();
-  const sheet = await Sheet.findOne({ _id: id, userId: session.user.id }).lean();
-  
+  await requireSheetPermission(session.user.id, id, "read");
+
+  const sheet = await Sheet.findById(id).lean();
   if (!sheet) return null;
-  
+
+  const isOwner = String(sheet.userId) === session.user.id;
+  if (sheet.deletedAt && !isOwner) return null;
+
+  const access = await getEffectiveSheetAccess(session.user.id, id);
+
+  const inTrash = !!sheet.deletedAt;
+  const canEdit = access ? roleMeets("write", access) : false;
+  const canTitleLive = access ? roleMeets("title", access) : false;
+
   return {
     _id: sheet._id.toString(),
     title: sheet.title,
     canvasState: sheet.canvasState,
     updatedAt: sheet.updatedAt ? new Date(sheet.updatedAt).toISOString() : new Date().toISOString(),
+    createdAt: sheet.createdAt ? new Date(sheet.createdAt).toISOString() : new Date().toISOString(),
+    contentVersion: sheet.contentVersion ?? 0,
+    organizationId: sheet.organizationId ? String(sheet.organizationId) : null,
+    folderId: sheet.folderId ? String(sheet.folderId) : null,
+    approxBytes: typeof sheet.approxBytes === "number" ? sheet.approxBytes : 0,
+    inTrash,
+    canWrite: inTrash ? false : canEdit,
+    canTitle: inTrash ? false : canTitleLive,
   };
 }
 
@@ -63,11 +269,9 @@ export async function updateSheetTitle(id: string, title: string) {
   const nextTitle = trimmed.length > 0 ? trimmed : "Untitled Note";
 
   await dbConnect();
-  const res = await Sheet.findOneAndUpdate(
-    { _id: id, userId: session.user.id },
-    { title: nextTitle },
-    { new: true }
-  );
+  await requireSheetPermission(session.user.id, id, "title");
+
+  const res = await Sheet.findOneAndUpdate({ _id: id }, { title: nextTitle }, { new: true });
 
   if (!res) throw new Error("Not found");
 
@@ -76,24 +280,269 @@ export async function updateSheetTitle(id: string, title: string) {
   return { title: nextTitle };
 }
 
-export async function saveSheetState(id: string, canvasState: unknown, previewImage?: string) {
+export async function setSheetPinned(id: string, pinned: boolean) {
   const session = await auth();
   if (!session?.user?.id) throw new Error("Unauthorized");
-
   await dbConnect();
-  await Sheet.findOneAndUpdate(
-    { _id: id, userId: session.user.id },
-    { canvasState, ...(previewImage && { previewImage }) }
-  );
-
-  return { success: true };
+  const sheet = await Sheet.findById(id).lean();
+  if (!sheet || String(sheet.userId) !== session.user.id) throw new Error("Forbidden");
+  if (sheet.deletedAt) throw new Error("Restore from trash first");
+  await Sheet.updateOne({ _id: id }, { $set: { pinned } });
+  revalidatePath("/dashboard");
 }
 
+export async function moveSheetToTrash(id: string) {
+  const session = await auth();
+  if (!session?.user?.id) throw new Error("Unauthorized");
+  await dbConnect();
+  await requireSheetPermission(session.user.id, id, "delete");
+
+  const sheet = await Sheet.findById(id).lean();
+  if (!sheet) throw new Error("Not found");
+  if (sheet.deletedAt) return;
+
+  const isOwner = String(sheet.userId) === session.user.id;
+  if (!isOwner) {
+    if (!sheet.organizationId) throw new Error("Forbidden");
+    await requireOrgAdmin(session.user.id, String(sheet.organizationId));
+  }
+
+  await Sheet.updateOne({ _id: id }, { $set: { deletedAt: new Date() } });
+  revalidatePath("/dashboard", "layout");
+  revalidatePath(`/sheet/${id}`);
+}
+
+export async function restoreSheetFromTrash(id: string) {
+  const session = await auth();
+  if (!session?.user?.id) throw new Error("Unauthorized");
+  await dbConnect();
+
+  const sheet = await Sheet.findById(id).lean();
+  if (!sheet || !sheet.deletedAt) throw new Error("Not found");
+  if (String(sheet.userId) !== session.user.id) {
+    if (!sheet.organizationId) throw new Error("Forbidden");
+    await requireOrgAdmin(session.user.id, String(sheet.organizationId));
+  }
+
+  await Sheet.updateOne({ _id: id }, { $unset: { deletedAt: "" } });
+  revalidatePath("/dashboard", "layout");
+  revalidatePath(`/sheet/${id}`);
+}
+
+export async function permanentlyDeleteSheet(id: string) {
+  const session = await auth();
+  if (!session?.user?.id) throw new Error("Unauthorized");
+  await dbConnect();
+
+  const sheet = await Sheet.findById(id).lean();
+  if (!sheet || !sheet.deletedAt) throw new Error("Only trashed sheets can be purged");
+
+  await requireSheetPermission(session.user.id, id, "delete");
+  const isOwner = String(sheet.userId) === session.user.id;
+  if (!isOwner) {
+    if (!sheet.organizationId) throw new Error("Forbidden");
+    await requireOrgAdmin(session.user.id, String(sheet.organizationId));
+  }
+
+  await Sheet.findByIdAndDelete(id);
+  await SheetGrant.deleteMany({ sheetId: new mongoose.Types.ObjectId(id) });
+  revalidatePath("/dashboard", "layout");
+}
+
+/** @deprecated Use moveSheetToTrash / permanentlyDeleteSheet */
 export async function deleteSheet(id: string) {
+  await moveSheetToTrash(id);
+}
+
+export async function reorderMyDriveSheets(orderedIds: string[]) {
+  const session = await auth();
+  if (!session?.user?.id) throw new Error("Unauthorized");
+  if (!orderedIds.length) return;
+  await dbConnect();
+
+  const ids = orderedIds.map((id) => new mongoose.Types.ObjectId(id));
+  const found = await Sheet.find({
+    _id: { $in: ids },
+    userId: new mongoose.Types.ObjectId(session.user.id),
+    $and: [{ $or: [{ organizationId: null }, { organizationId: { $exists: false } }] }, LIVE_SHEET],
+  })
+    .select("_id")
+    .lean();
+
+  if (found.length !== ids.length) throw new Error("Invalid sheet list");
+
+  let i = 0;
+  for (const id of orderedIds) {
+    await Sheet.updateOne({ _id: id }, { $set: { sortIndex: i } });
+    i += 1;
+  }
+  revalidatePath("/dashboard");
+}
+
+export async function reorderOrgSheets(organizationId: string, orderedIds: string[]) {
+  const session = await auth();
+  if (!session?.user?.id) throw new Error("Unauthorized");
+  if (!orderedIds.length) return;
+  await dbConnect();
+  await requireOrgMember(session.user.id, organizationId);
+
+  const orgOid = new mongoose.Types.ObjectId(organizationId);
+  const ids = orderedIds.map((id) => new mongoose.Types.ObjectId(id));
+  const found = await Sheet.find({
+    _id: { $in: ids },
+    organizationId: orgOid,
+    ...LIVE_SHEET,
+  })
+    .select("_id")
+    .lean();
+
+  if (found.length !== ids.length) throw new Error("Invalid sheet list");
+
+  let i = 0;
+  for (const id of orderedIds) {
+    await Sheet.updateOne({ _id: id }, { $set: { sortIndex: i } });
+    i += 1;
+  }
+  revalidatePath("/dashboard");
+  revalidatePath(`/dashboard/org/${organizationId}`);
+}
+
+export async function saveSheetState(
+  id: string,
+  canvasState: unknown,
+  previewImage?: string,
+  clientVersion?: number
+) {
   const session = await auth();
   if (!session?.user?.id) throw new Error("Unauthorized");
 
   await dbConnect();
-  await Sheet.findOneAndDelete({ _id: id, userId: session.user.id });
+  await requireSheetPermission(session.user.id, id, "write");
+
+  const current = await Sheet.findById(id).select("contentVersion deletedAt").lean();
+  if (!current) throw new Error("Not found");
+  if (current.deletedAt) throw new Error("Cannot save a trashed note — restore it first");
+
+  const serverV = current.contentVersion ?? 0;
+  if (typeof clientVersion === "number" && clientVersion < serverV) {
+    return { success: false, conflict: true as const, contentVersion: serverV };
+  }
+
+  const nextVersion = serverV + 1;
+  const approxBytes = approxStateBytes(canvasState);
+  await Sheet.findByIdAndUpdate(id, {
+    canvasState,
+    ...(previewImage && { previewImage }),
+    contentVersion: nextVersion,
+    approxBytes,
+    lastSavedByUserId: new mongoose.Types.ObjectId(session.user.id),
+  });
+
+  return { success: true as const, contentVersion: nextVersion };
+}
+
+export async function moveSheetToFolder(sheetId: string, folderId: string | null) {
+  const session = await auth();
+  if (!session?.user?.id) throw new Error("Unauthorized");
+  await dbConnect();
+
+  const sheet = await Sheet.findById(sheetId).lean();
+  if (!sheet) throw new Error("Not found");
+  if (String(sheet.userId) !== session.user.id) throw new Error("Forbidden");
+  if (sheet.deletedAt) throw new Error("Restore from trash first");
+
+  if (folderId) {
+    const folder = await Folder.findOne({ _id: folderId, ...LIVE_FOLDER }).lean();
+    if (!folder) throw new Error("Folder not found");
+    if (sheet.organizationId) {
+      if (String(folder.organizationId) !== String(sheet.organizationId)) throw new Error("Invalid folder");
+    } else {
+      if (String(folder.ownerUserId) !== session.user.id) throw new Error("Invalid folder");
+    }
+  }
+
+  await Sheet.updateOne(
+    { _id: sheetId, userId: session.user.id },
+    { folderId: folderId ? new mongoose.Types.ObjectId(folderId) : undefined }
+  );
   revalidatePath("/dashboard");
+}
+
+type PopUser = { _id: mongoose.Types.ObjectId; name?: string; email?: string; image?: string };
+
+export async function getSheetInfo(sheetId: string) {
+  const session = await auth();
+  if (!session?.user?.id) throw new Error("Unauthorized");
+  await dbConnect();
+  await requireSheetPermission(session.user.id, sheetId, "read");
+
+  const sheet = await Sheet.findById(sheetId).populate("userId", "name email image").lean();
+  if (!sheet) throw new Error("Not found");
+
+  const owner = sheet.userId as unknown as PopUser | undefined;
+
+  const lastSavedByRaw = (sheet as { lastSavedByUserId?: unknown }).lastSavedByUserId;
+  let lastSaved: PopUser | undefined;
+  if (lastSavedByRaw) {
+    const id =
+      typeof lastSavedByRaw === "object" && lastSavedByRaw !== null && "_id" in lastSavedByRaw
+        ? String((lastSavedByRaw as { _id: unknown })._id)
+        : String(lastSavedByRaw);
+    const u = await User.findById(id).select("name email image").lean();
+    if (u) lastSaved = u as PopUser;
+  }
+
+  const grants = await SheetGrant.find({ sheetId: new mongoose.Types.ObjectId(sheetId) })
+    .populate("granteeUserId", "name email image")
+    .lean();
+
+  let organization: { _id: string; name: string } | null = null;
+  if (sheet.organizationId) {
+    const o = await Organization.findById(sheet.organizationId).select("name").lean();
+    if (o) organization = { _id: String(o._id), name: (o as { name?: string }).name ?? "Organization" };
+  }
+
+  const access = await getEffectiveSheetAccess(session.user.id, sheetId);
+
+  return {
+    title: sheet.title ?? "Untitled",
+    owner: owner
+      ? {
+          userId: String(owner._id),
+          name: owner.name ?? owner.email ?? "User",
+          email: owner.email ?? "",
+          image: owner.image ?? null,
+        }
+      : null,
+    lastSavedBy: lastSaved
+      ? {
+          userId: String(lastSaved._id),
+          name: lastSaved.name ?? lastSaved.email ?? "User",
+          email: lastSaved.email ?? "",
+          image: lastSaved.image ?? null,
+        }
+      : null,
+    shares: grants.map((g) => {
+      const u = g.granteeUserId as unknown as PopUser | undefined;
+      return {
+        userId: u ? String(u._id) : String(g.granteeUserId),
+        name: u?.name ?? u?.email ?? "User",
+        email: u?.email ?? "",
+        image: u?.image ?? null,
+        role: g.role as string,
+        via: g.via as string,
+        allowForwardShare: !!g.allowForwardShare,
+      };
+    }),
+    organization,
+    yourRole: access?.role ?? "unknown",
+    yourActor: access?.actor ?? "unknown",
+    orgMemberRole: access?.orgMemberRole ?? null,
+    contentVersion: sheet.contentVersion ?? 0,
+    approxBytes: typeof sheet.approxBytes === "number" ? sheet.approxBytes : 0,
+    createdAt: sheet.createdAt ? new Date(sheet.createdAt).toISOString() : null,
+    updatedAt: sheet.updatedAt ? new Date(sheet.updatedAt).toISOString() : null,
+    folderId: sheet.folderId ? String(sheet.folderId) : null,
+    inTrash: !!sheet.deletedAt,
+  };
 }

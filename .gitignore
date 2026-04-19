@@ -19,6 +19,8 @@
 
 # production
 /build
+/server/prod.cjs
+/realtime/server.bundle.cjs
 
 # misc
 .DS_Store

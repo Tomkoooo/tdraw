@@ -1,33 +1,76 @@
 @import "tailwindcss";
 
 @theme {
-  --color-canvas-light: #FAF7F0;
-  --color-canvas-dark: #1C1C1E;
-  --color-surface-light: #F5F5F7;
-  --color-surface-dark: #252528;
-  --color-text-light: #1C1C1E;
-  --color-text-dark: #F0F0F5;
-  --color-accent-light: #0071E3;
-  --color-accent-dark: #0A84FF;
-  
-  --font-sans: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif, "Apple Color Emoji", "Segoe UI Emoji", "Segoe UI Symbol";
+  --color-canvas-light: #fbfaf8;
+  --color-canvas-dark: #121214;
+  --color-surface-light: #f2f1ee;
+  --color-surface-dark: #1e1e22;
+  --color-text-light: #1a1917;
+  --color-text-dark: #f2f0eb;
+  /* Premium red accent */
+  --color-accent-light: #922210;
+  --color-accent-dark: #c43d28;
+
+  --font-sans: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif,
+    "Apple Color Emoji", "Segoe UI Emoji", "Segoe UI Symbol";
+
+  --radius-glass-card: 1.5rem;
+  --radius-glass-pill: 9999px;
+  --glass-blur: 28px;
+  --glass-blur-thick: 36px;
+  --glass-blur-menu: 40px;
+  --shadow-float: 0 10px 36px rgb(0 0 0 / 0.06);
+  --shadow-float-dark: 0 14px 48px rgb(0 0 0 / 0.42);
+  --ease-out-soft: cubic-bezier(0.22, 1, 0.36, 1);
+  --duration-theme: 300ms;
+  --duration-micro: 200ms;
 }
 
 @layer base {
-  :root {
+  :root,
+  [data-theme="light"] {
     --bg-canvas: var(--color-canvas-light);
     --bg-surface: var(--color-surface-light);
     --color-text: var(--color-text-light);
     --color-accent: var(--color-accent-light);
-    color-scheme: light dark;
+    --glass-bg: color-mix(in srgb, var(--bg-surface) 88%, transparent);
+    --glass-bg-menu: color-mix(in srgb, var(--bg-surface) 94%, transparent);
+    --glass-border: color-mix(in srgb, var(--color-text) 5%, transparent);
+    --glass-border-strong: color-mix(in srgb, var(--color-text) 8%, transparent);
+    --glass-highlight: color-mix(in srgb, #ffffff 70%, transparent);
+    --input-border: color-mix(in srgb, var(--color-text) 6%, transparent);
+    --input-bg: color-mix(in srgb, #ffffff 82%, var(--bg-surface));
+    color-scheme: light;
   }
-  
-  @media (prefers-color-scheme: dark) {
-    :root {
-      --bg-canvas: var(--color-canvas-dark);
-      --bg-surface: var(--color-surface-dark);
-      --color-text: var(--color-text-dark);
-      --color-accent: var(--color-accent-dark);
+
+  [data-theme="dark"] {
+    --bg-canvas: var(--color-canvas-dark);
+    --bg-surface: var(--color-surface-dark);
+    --color-text: var(--color-text-dark);
+    --color-accent: var(--color-accent-dark);
+    --glass-bg: color-mix(in srgb, var(--bg-surface) 92%, transparent);
+    --glass-bg-menu: color-mix(in srgb, #0d0d10 96%, transparent);
+    --glass-border: color-mix(in srgb, var(--color-text) 6%, transparent);
+    --glass-border-strong: color-mix(in srgb, var(--color-text) 10%, transparent);
+    --glass-highlight: color-mix(in srgb, #ffffff 6%, transparent);
+    --input-border: color-mix(in srgb, var(--color-text) 8%, transparent);
+    --input-bg: color-mix(in srgb, var(--bg-surface) 92%, #000000);
+    color-scheme: dark;
+  }
+
+  html {
+    color: var(--color-text);
+  }
+
+  html[data-theme-transition="on"] :where(body, [data-theme-surface]) {
+    transition:
+      background-color var(--duration-theme) var(--ease-out-soft),
+      color var(--duration-theme) var(--ease-out-soft);
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    html[data-theme-transition="on"] :where(body, [data-theme-surface]) {
+      transition: none;
     }
   }
 
@@ -35,7 +78,7 @@
     background-color: var(--bg-canvas);
     color: var(--color-text);
     font-family: var(--font-sans);
-    overscroll-behavior-y: none; /* Crucial for iPad */
+    overscroll-behavior-y: none;
     -webkit-font-smoothing: antialiased;
     margin: 0;
     padding: 0;
@@ -44,9 +87,73 @@
 
 @layer utilities {
   .glass {
-    background-color: color-mix(in srgb, var(--bg-surface) 80%, transparent);
-    backdrop-filter: blur(20px);
-    -webkit-backdrop-filter: blur(20px);
-    border: 1px solid color-mix(in srgb, var(--color-text) 10%, transparent);
+    background-color: var(--glass-bg);
+    backdrop-filter: blur(var(--glass-blur));
+    -webkit-backdrop-filter: blur(var(--glass-blur));
+    border: 1px solid var(--glass-border);
+    box-shadow: var(--shadow-float), inset 0 1px 0 0 var(--glass-highlight);
+  }
+
+  .glass-thick {
+    background-color: color-mix(in srgb, var(--glass-bg) 96%, transparent);
+    backdrop-filter: blur(var(--glass-blur-thick)) saturate(1.45);
+    -webkit-backdrop-filter: blur(var(--glass-blur-thick)) saturate(1.45);
+    border: 1px solid var(--glass-border-strong);
+    box-shadow: var(--shadow-float), inset 0 1px 0 0 var(--glass-highlight);
+  }
+
+  /** Dropdowns, popovers — background dominates over content behind */
+  .glass-menu {
+    border-radius: var(--radius-glass-card);
+    background-color: var(--glass-bg-menu);
+    backdrop-filter: blur(var(--glass-blur-menu)) saturate(1.5);
+    -webkit-backdrop-filter: blur(var(--glass-blur-menu)) saturate(1.5);
+    border: 1px solid var(--glass-border-strong);
+    box-shadow: var(--shadow-float), inset 0 1px 0 0 var(--glass-highlight);
+  }
+
+  .glass-panel {
+    border-radius: var(--radius-glass-card);
+    background-color: var(--glass-bg);
+    backdrop-filter: blur(var(--glass-blur)) saturate(1.25);
+    -webkit-backdrop-filter: blur(var(--glass-blur)) saturate(1.25);
+    border: 1px solid var(--glass-border);
+    box-shadow: var(--shadow-float), inset 0 1px 0 0 var(--glass-highlight);
+  }
+
+  [data-theme="dark"] .glass,
+  [data-theme="dark"] .glass-thick,
+  [data-theme="dark"] .glass-panel,
+  [data-theme="dark"] .glass-menu {
+    box-shadow: var(--shadow-float-dark), inset 0 1px 0 0 var(--glass-highlight);
+  }
+
+  .input-field {
+    border-radius: 1rem;
+    border: 1px solid var(--input-border);
+    background-color: var(--input-bg);
+  }
+
+  .lift-sm {
+    transform: translateY(-2px);
+  }
+
+  .animate-micro {
+    transition:
+      transform var(--duration-micro) var(--ease-out-soft),
+      opacity var(--duration-micro) var(--ease-out-soft),
+      box-shadow var(--duration-micro) var(--ease-out-soft);
+  }
+
+  .pt-safe-top {
+    padding-top: env(safe-area-inset-top, 0px);
+  }
+
+  .pb-safe-bottom {
+    padding-bottom: env(safe-area-inset-bottom, 0px);
+  }
+
+  .mb-toolbar-lift {
+    margin-bottom: max(14px, env(safe-area-inset-bottom, 0px));
   }
 }

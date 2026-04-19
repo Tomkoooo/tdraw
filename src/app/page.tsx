@@ -2,22 +2,28 @@ import SignInButton from "@/components/SignInButton";
 import { auth } from "@/auth";
 import { redirect } from "next/navigation";
 
-export default async function Home() {
+export default async function Home({ searchParams }: { searchParams: Promise<{ callbackUrl?: string }> }) {
   const session = await auth();
   if (session) {
     redirect("/dashboard");
   }
 
-  return (
-    <div className="min-h-screen flex flex-col items-center justify-center relative overflow-hidden bg-[var(--bg-canvas)]">
-      {/* Abstract Background Shapes */}
-      <div className="absolute top-[-10%] left-[-10%] w-[50%] h-[50%] bg-[#0071E3] rounded-full mix-blend-multiply filter blur-[120px] opacity-20"></div>
-      <div className="absolute top-[20%] right-[-10%] w-[50%] h-[50%] bg-[#FF2D55] rounded-full mix-blend-multiply filter blur-[120px] opacity-20"></div>
-      <div className="absolute bottom-[-20%] left-[20%] w-[50%] h-[50%] bg-[#5856D6] rounded-full mix-blend-multiply filter blur-[120px] opacity-20"></div>
+  const sp = await searchParams;
+  const callbackUrl =
+    sp.callbackUrl && sp.callbackUrl.startsWith("/") && !sp.callbackUrl.startsWith("//")
+      ? sp.callbackUrl
+      : "/dashboard";
 
-      <div className="z-10 flex flex-col items-center w-full px-6">
-        <div className="glass p-10 rounded-[2.5rem] flex flex-col items-center text-center shadow-2xl mb-8 border border-white/20 dark:border-white/10 max-w-md w-full">
-          <div className="w-24 h-24 bg-gradient-to-br from-[#0071E3] to-[#5856D6] rounded-[2rem] flex items-center justify-center mb-8 shadow-xl shadow-blue-500/20">
+  return (
+    <div className="relative flex min-h-[100dvh] flex-col items-center justify-center overflow-x-hidden bg-[var(--bg-canvas)] px-6">
+      <div className="pointer-events-none absolute inset-0 z-0">
+        <div className="absolute -left-[20%] top-[-15%] h-[55vmin] w-[55vmin] rounded-full bg-[var(--color-accent)] opacity-[0.12] blur-[100px]" />
+        <div className="absolute -right-[15%] bottom-[-20%] h-[45vmin] w-[45vmin] rounded-full bg-[#5856D6] opacity-[0.08] blur-[90px]" />
+      </div>
+
+      <div className="relative z-[100] isolate flex w-full max-w-md flex-col items-center pointer-events-auto">
+        <div className="glass-thick pointer-events-auto relative z-10 mb-8 flex w-full flex-col items-center rounded-[2.5rem] p-10 text-center shadow-2xl">
+          <div className="mb-8 flex h-24 w-24 items-center justify-center rounded-[2rem] bg-[var(--color-accent)]/15 shadow-inner">
             <svg
               className="w-12 h-12 text-white"
               fill="none"
@@ -28,14 +34,12 @@ export default async function Home() {
               <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2.5} d="M15.232 5.232l3.536 3.536m-2.036-5.036a2.5 2.5 0 113.536 3.536L6.5 21.036H3v-3.572L16.732 3.732z" />
             </svg>
           </div>
-          <h1 className="text-5xl font-extrabold tracking-tight mb-4 text-transparent bg-clip-text bg-gradient-to-r from-[var(--color-text)] to-gray-400">
-            tDraw
-          </h1>
-          <p className="text-gray-500 dark:text-gray-400 text-xl font-medium mb-10">
-            The premium iPad-first note-taking experience.
+          <h1 className="mb-3 text-5xl font-extrabold tracking-tight text-[var(--color-text)]">tDraw</h1>
+          <p className="mb-10 text-lg font-medium leading-relaxed text-gray-500 dark:text-gray-400">
+            Calm, glass-native notes for iPad — draw, share, and stay in flow.
           </p>
           <div className="w-full">
-            <SignInButton />
+            <SignInButton redirectTo={callbackUrl} />
           </div>
         </div>
       </div>
