@@ -5,6 +5,7 @@ export type SheetCard = {
   createdAt: string;
   previewImage: string | null;
   folderId?: string | null;
+  organizationId?: string | null;
   pinned?: boolean;
   approxBytes?: number;
   userId?: string | null;

@@ -1,13 +1,16 @@
 "use client";
 
-import { useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
 import {
   inviteOrganizationMember,
+  listOrganizationInvites,
   removeOrganizationMember,
   updateOrganizationMemberRole,
 } from "@/lib/actions/org";
 import UserAvatar from "@/components/UserAvatar";
+import InviteListPanel from "@/components/InviteListPanel";
+import { toastActionError } from "@/lib/client/actionFeedback";
 
 type OrgMemberRole = "admin" | "member" | "guest";
 
@@ -24,6 +27,56 @@ export default function OrgManageClient({
   const [email, setEmail] = useState("");
   const [role, setRole] = useState<OrgMemberRole>("member");
   const [busy, setBusy] = useState(false);
+  const [inviteRefresh, setInviteRefresh] = useState(0);
+  const [showExpiredInvites, setShowExpiredInvites] = useState(false);
+  const [inviteRows, setInviteRows] = useState<
+    Awaited<ReturnType<typeof listOrganizationInvites>>["items"]
+  >([]);
+  const [hiddenExpiredCount, setHiddenExpiredCount] = useState(0);
+  const [invitesLoading, setInvitesLoading] = useState(true);
+  const [invitesError, setInvitesError] = useState<string | null>(null);
+
+  const loadOrgInvites = useCallback(
+    async (signal?: AbortSignal) => {
+      if (!isAdmin) {
+        setInvitesLoading(false);
+        setInviteRows([]);
+        setHiddenExpiredCount(0);
+        setInvitesError(null);
+        return;
+      }
+      setInvitesLoading(true);
+      setInvitesError(null);
+      try {
+        const { items, hiddenExpiredCount: hidden } = await listOrganizationInvites(organizationId, {
+          includeExpired: showExpiredInvites,
+        });
+        if (signal?.aborted) return;
+        setInviteRows(items);
+        setHiddenExpiredCount(hidden);
+      } catch (e: unknown) {
+        if (signal?.aborted) return;
+        toastActionError(e, { id: "org-list-invites" });
+        setInvitesError("Could not load invitations.");
+        setInviteRows([]);
+        setHiddenExpiredCount(0);
+      } finally {
+        if (!signal?.aborted) setInvitesLoading(false);
+      }
+    },
+    [isAdmin, organizationId, showExpiredInvites]
+  );
+
+  useEffect(() => {
+    const ac = new AbortController();
+    const tid = setTimeout(() => {
+      void loadOrgInvites(ac.signal);
+    }, 0);
+    return () => {
+      ac.abort();
+      clearTimeout(tid);
+    };
+  }, [loadOrgInvites, inviteRefresh]);
 
   if (!isAdmin) {
     return (
@@ -77,9 +130,10 @@ export default function OrgManageClient({
               try {
                 await inviteOrganizationMember(organizationId, email, role);
                 setEmail("");
+                setInviteRefresh((n) => n + 1);
                 router.refresh();
               } catch (e) {
-                alert(e instanceof Error ? e.message : "Failed");
+                toastActionError(e, { id: "org-invite-member" });
               } finally {
                 setBusy(false);
               }
@@ -89,6 +143,23 @@ export default function OrgManageClient({
           </button>
         </div>
       </section>
+
+      <InviteListPanel
+        key={organizationId}
+        title="Organization invitations"
+        loading={invitesLoading}
+        error={invitesError}
+        rows={inviteRows.map((i) => ({
+          email: i.email,
+          role: i.role,
+          status: i.status,
+          expiresAt: i.expiresAt,
+          acceptedAt: i.acceptedAt,
+        }))}
+        showExpired={showExpiredInvites}
+        hiddenExpiredCount={hiddenExpiredCount}
+        onShowExpiredChange={setShowExpiredInvites}
+      />
 
       <section className="rounded-2xl border border-white/15 bg-black/[0.03] p-6 dark:bg-white/[0.04]">
         <h2 className="mb-3 font-semibold">Members</h2>
@@ -110,8 +181,12 @@ export default function OrgManageClient({
                   value={m.role}
                   onChange={async (e) => {
                     const r = e.target.value as OrgMemberRole;
-                    await updateOrganizationMemberRole(organizationId, m.userId, r);
-                    router.refresh();
+                    try {
+                      await updateOrganizationMemberRole(organizationId, m.userId, r);
+                      router.refresh();
+                    } catch (err) {
+                      toastActionError(err, { id: "org-role-change" });
+                    }
                   }}
                   className="rounded-lg border border-white/20 bg-transparent px-2 py-1 text-xs"
                 >
@@ -124,8 +199,12 @@ export default function OrgManageClient({
                   className="rounded-lg border border-red-500/40 px-2 py-1 text-xs font-semibold text-red-600"
                   onClick={async () => {
                     if (!confirm("Remove this member?")) return;
-                    await removeOrganizationMember(organizationId, m.userId);
-                    router.refresh();
+                    try {
+                      await removeOrganizationMember(organizationId, m.userId);
+                      router.refresh();
+                    } catch (err) {
+                      toastActionError(err, { id: "org-remove-member" });
+                    }
                   }}
                 >
                   Remove

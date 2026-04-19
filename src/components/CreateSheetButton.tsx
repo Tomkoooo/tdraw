@@ -2,6 +2,7 @@
 
 import { Plus } from "lucide-react";
 import { createSheet } from "@/lib/actions/sheet";
+import { toastActionError } from "@/lib/client/actionFeedback";
 import { useRouter } from "next/navigation";
 import { useState } from "react";
 
@@ -22,8 +23,14 @@ export default function CreateSheetButton({
       disabled={loading}
       onClick={async () => {
         setLoading(true);
-        const id = await createSheet({ organizationId, folderId });
-        router.push(`/sheet/${id}`);
+        try {
+          const id = await createSheet({ organizationId, folderId });
+          router.push(`/sheet/${id}`);
+        } catch (e) {
+          toastActionError(e, { id: "create-sheet-btn" });
+        } finally {
+          setLoading(false);
+        }
       }}
       className="glass group flex aspect-[4/3] cursor-pointer flex-col items-center justify-center rounded-[2rem] border-2 border-dashed border-[var(--color-accent)]/45 p-8 text-[var(--color-accent)] transition-all hover:border-[var(--color-accent)] hover:bg-[var(--color-accent)]/8 disabled:opacity-50"
     >

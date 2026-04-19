@@ -144,7 +144,70 @@ export async function inviteOrganizationMember(organizationId: string, email: st
   });
 
   revalidatePath("/dashboard");
+  revalidatePath(`/dashboard/org/${organizationId}`);
   return { ok: true as const };
+}
+
+export type OrgInviteListStatus = "pending" | "accepted" | "expired";
+
+export type OrgInviteListItem = {
+  email: string;
+  role: OrgMemberRole;
+  expiresAt: string;
+  acceptedAt: string | null;
+  createdAt: string;
+  status: OrgInviteListStatus;
+};
+
+function orgInviteStatus(
+  acceptedAt: Date | undefined | null,
+  expiresAt: Date,
+  now: Date
+): OrgInviteListStatus {
+  if (acceptedAt) return "accepted";
+  if (expiresAt.getTime() <= now.getTime()) return "expired";
+  return "pending";
+}
+
+const ORG_INVITE_LIST_LIMIT = 120;
+
+/** Email invitations for this org (newest first). Expired omitted unless `includeExpired`. Admins only. */
+export async function listOrganizationInvites(
+  organizationId: string,
+  opts?: { includeExpired?: boolean }
+): Promise<{ items: OrgInviteListItem[]; hiddenExpiredCount: number }> {
+  const session = await auth();
+  if (!session?.user?.id) throw new Error("Unauthorized");
+  await dbConnect();
+  await requireOrgAdmin(session.user.id, organizationId);
+
+  const includeExpired = Boolean(opts?.includeExpired);
+  const raw = await OrganizationInvitation.find({
+    organizationId: new mongoose.Types.ObjectId(organizationId),
+  })
+    .select("email role expiresAt acceptedAt createdAt")
+    .sort({ createdAt: -1 })
+    .limit(ORG_INVITE_LIST_LIMIT)
+    .lean();
+
+  const now = new Date();
+  const mapped: OrgInviteListItem[] = raw.map((i) => {
+    const acceptedAt = i.acceptedAt ?? null;
+    const status = orgInviteStatus(acceptedAt, i.expiresAt, now);
+    return {
+      email: i.email,
+      role: i.role as OrgMemberRole,
+      expiresAt: i.expiresAt.toISOString(),
+      acceptedAt: acceptedAt ? acceptedAt.toISOString() : null,
+      createdAt: (i.createdAt ?? i.expiresAt).toISOString(),
+      status,
+    };
+  });
+
+  const hiddenExpiredCount = mapped.filter((m) => m.status === "expired").length;
+  const items = includeExpired ? mapped : mapped.filter((m) => m.status !== "expired");
+
+  return { items, hiddenExpiredCount: includeExpired ? 0 : hiddenExpiredCount };
 }
 
 export async function acceptOrgInviteByToken(rawToken: string) {
@@ -175,8 +238,10 @@ export async function acceptOrgInviteByToken(rawToken: string) {
     { $set: { acceptedAt: new Date(), acceptedByUserId: new mongoose.Types.ObjectId(session.user.id) } }
   );
 
+  const oid = String(inv.organizationId);
   revalidatePath("/dashboard");
-  return { organizationId: String(inv.organizationId) };
+  revalidatePath(`/dashboard/org/${oid}`);
+  return { organizationId: oid };
 }
 
 export async function removeOrganizationMember(organizationId: string, userId: string) {

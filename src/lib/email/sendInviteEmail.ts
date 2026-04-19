@@ -37,6 +37,10 @@ export async function sendInviteEmail(payload: InvitePayload): Promise<{ ok: boo
       port,
       secure,
       auth: user && pass !== undefined && pass !== "" ? { user, pass } : undefined,
+      /** Avoid hanging the whole server action when SMTP is wrong or the host blocks (common in dev). */
+      connectionTimeout: 12_000,
+      greetingTimeout: 10_000,
+      socketTimeout: 18_000,
     });
 
     await transporter.sendMail({

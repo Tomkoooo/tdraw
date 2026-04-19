@@ -8,9 +8,14 @@ import { getRealtimeToken } from "@/lib/actions/socketToken";
 import { importPdfToEditor } from "@/lib/pdf/importPdfToEditor";
 import { exportEditorToPdf } from "@/lib/pdf/exportEditorToPdf";
 import { toolsForHotbarPreference } from "@/lib/tldraw/toolRegistry";
+import {
+  isValidContentVersion,
+  shouldRejectRemoteSnapshotAsLikelyCorrupt,
+} from "@/lib/tldraw/snapshotGuards";
 import SheetShareForm from "@/components/SheetShareForm";
 import { useCalculator } from "@/context/CalculatorContext";
 import CanvasShareSheet from "@/components/canvas/CanvasShareSheet";
+import SheetVisitRecorder from "@/components/SheetVisitRecorder";
 import UserAvatar from "@/components/UserAvatar";
 import OrgWorkspaceRealtime, { type OnlineMember } from "@/components/realtime/OrgWorkspaceRealtime";
 import {
@@ -28,6 +33,14 @@ import { useRouter } from "next/navigation";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { io, type Socket } from "socket.io-client";
 import localforage from "localforage";
+import { toast } from "sonner";
+
+type FlushCanvasSaveResult =
+  | { status: "skipped" }
+  | { status: "saved"; contentVersion: number }
+  | { status: "conflict"; serverVersion: number }
+  | { status: "queued" }
+  | { status: "error"; message: string };
 
 interface TldrawEditorProps {
   sheetId: string;
@@ -58,7 +71,7 @@ export default function TldrawEditor({
   title: initialTitle,
   canWrite,
   canTitle,
-  contentVersion: initialVersion,
+  contentVersion: initialVersionFromProps,
   hotbarToolIds,
   userName,
   userImage,
@@ -66,6 +79,10 @@ export default function TldrawEditor({
   organizationId = null,
   showSharePanel = true,
 }: TldrawEditorProps) {
+  const initialVersion =
+    typeof initialVersionFromProps === "number" && Number.isFinite(initialVersionFromProps)
+      ? initialVersionFromProps
+      : 0;
   const router = useRouter();
   const [editor, setEditor] = useState<Editor | null>(null);
   const [title, setTitle] = useState(initialTitle);
@@ -81,6 +98,10 @@ export default function TldrawEditor({
   const blockSaveRef = useRef(false);
   const editorRef = useRef<Editor | null>(null);
   const versionRef = useRef(initialVersion);
+  const hasLocalEditsSinceLastPersistRef = useRef(false);
+  /** Ignore early store "user" churn right after mount so we don't flush/negotiate bogus dirty state with realtime. */
+  const allowLocalDirtyTrackingRef = useRef(false);
+  const bootstrapDirtyTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const longPressTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const [busy, setBusy] = useState<BusyKind | null>(null);
@@ -99,6 +120,19 @@ export default function TldrawEditor({
   useEffect(() => {
     busyRef.current = busy;
   }, [busy]);
+
+  useEffect(() => {
+    versionRef.current = Math.max(versionRef.current, initialVersion);
+  }, [initialVersion]);
+
+  useEffect(() => {
+    return () => {
+      if (bootstrapDirtyTimerRef.current !== null) {
+        clearTimeout(bootstrapDirtyTimerRef.current);
+        bootstrapDirtyTimerRef.current = null;
+      }
+    };
+  }, [sheetId]);
 
   const hotbarTools = useMemo(() => toolsForHotbarPreference(hotbarToolIds), [hotbarToolIds]);
 
@@ -221,6 +255,57 @@ export default function TldrawEditor({
     };
   }, [editor, userId]);
 
+  const flushCanvasSave = useCallback(async (): Promise<FlushCanvasSaveResult> => {
+    const ed = editorRef.current;
+    if (!ed || blockSaveRef.current || !canWrite) return { status: "skipped" };
+    try {
+      const snapshot = getSnapshot(ed.store);
+      const res = await saveSheetState(sheetId, snapshot, undefined, versionRef.current);
+      if ("conflict" in res && res.conflict) {
+        const serverVersion = typeof res.contentVersion === "number" ? res.contentVersion : versionRef.current;
+        toast.error("Couldn’t save — this note was updated elsewhere first.", {
+          id: "sheet-save-conflict",
+          description: "Reload to load the latest version. Your screen still shows what you drew until you reload.",
+          duration: 16_000,
+          action: {
+            label: "Reload",
+            onClick: () => router.refresh(),
+          },
+        });
+        return { status: "conflict", serverVersion };
+      }
+      if ("contentVersion" in res && typeof res.contentVersion === "number") {
+        versionRef.current = res.contentVersion;
+      }
+      hasLocalEditsSinceLastPersistRef.current = false;
+      const sk = socketRef.current;
+      if (sk?.connected) {
+        sk.emit("sheet:snapshot", { sheetId, snapshot, contentVersion: versionRef.current });
+      }
+      return { status: "saved", contentVersion: versionRef.current };
+    } catch (e) {
+      console.error(e);
+      try {
+        const snapshot = getSnapshot(ed.store);
+        const q = ((await localforage.getItem<unknown[]>(queueKey(sheetId))) ?? []) as unknown[];
+        q.push({ snapshot, at: Date.now(), v: versionRef.current });
+        await localforage.setItem(queueKey(sheetId), q);
+        toast.warning("Couldn’t reach the server — your latest edits are queued on this device.", {
+          id: "sheet-offline-queue",
+          description: "They will upload automatically when you are back online.",
+          duration: 10_000,
+        });
+        return { status: "queued" };
+      } catch {
+        toast.error("Couldn’t save and couldn’t store an offline copy.", {
+          id: "sheet-save-fatal",
+          duration: 12_000,
+        });
+        return { status: "error", message: "queue-failed" };
+      }
+    }
+  }, [sheetId, canWrite, router]);
+
   useEffect(() => {
     let socket: Socket | null = null;
 
@@ -245,23 +330,101 @@ export default function TldrawEditor({
 
         socket.emit("joinSheet", sheetId, () => {});
 
-        socket.on("sheet:snapshot", ({ snapshot, contentVersion, fromUserId }) => {
-          if (userId && fromUserId === userId) return;
-          if (typeof contentVersion === "number" && contentVersion > versionRef.current) {
+        socket.on(
+          "sheet:snapshot",
+          async ({
+            snapshot,
+            contentVersion,
+            fromUserId,
+          }: {
+            snapshot?: unknown;
+            contentVersion?: number;
+            fromUserId?: string;
+          }) => {
+            if (userId && fromUserId === userId) return;
+            if (!isValidContentVersion(contentVersion) || contentVersion <= versionRef.current) return;
             const ed = editorRef.current;
-            if (ed) {
+            if (!ed || snapshot === undefined || snapshot === null || typeof snapshot !== "object") return;
+
+            let currentSnap: unknown = null;
+            try {
+              currentSnap = getSnapshot(ed.store);
+            } catch {
+              /* store may be mid-teardown */
+            }
+            if (
+              currentSnap !== null &&
+              shouldRejectRemoteSnapshotAsLikelyCorrupt(snapshot, currentSnap)
+            ) {
+              toast.error("Ignored a bad sync packet that would have cleared your canvas.", {
+                id: "sheet-remote-snapshot-reject",
+                description: "Try reload if the note looks wrong. If this keeps happening, report it.",
+                duration: 10_000,
+                action: { label: "Reload", onClick: () => router.refresh() },
+              });
+              return;
+            }
+
+            if (!canWrite) {
               try {
                 blockSaveRef.current = true;
-                loadSnapshot(ed.store, snapshot);
+                loadSnapshot(ed.store, snapshot as Parameters<typeof loadSnapshot>[1]);
                 versionRef.current = contentVersion;
+                toast.message("This note was updated.", {
+                  id: "sheet-remote-viewer",
+                  description: "You are viewing the latest shared version.",
+                  duration: 4000,
+                });
               } catch (err) {
                 console.error(err);
+                toast.error("Couldn’t load the latest version of this note.");
               } finally {
                 blockSaveRef.current = false;
               }
+              return;
+            }
+
+            if (hasLocalEditsSinceLastPersistRef.current) {
+              const flushResult = await flushCanvasSave();
+              if (flushResult.status === "conflict") {
+                return;
+              }
+              if (flushResult.status === "queued" || flushResult.status === "error") {
+                toast.message("Someone shared a newer version, but your edits haven’t synced yet.", {
+                  id: "sheet-remote-pending",
+                  description: "Reconnect or fix your network, then use Reload if you need the latest from the server.",
+                  duration: 12_000,
+                  action: { label: "Reload", onClick: () => router.refresh() },
+                });
+                return;
+              }
+              if (contentVersion <= versionRef.current) {
+                toast.success("Your changes were saved.", { id: "sheet-flush-before-remote", duration: 3500 });
+                return;
+              }
+            }
+
+            try {
+              blockSaveRef.current = true;
+              loadSnapshot(ed.store, snapshot as Parameters<typeof loadSnapshot>[1]);
+              versionRef.current = contentVersion;
+              hasLocalEditsSinceLastPersistRef.current = false;
+              toast.message("Note synced to the latest shared version.", {
+                id: "sheet-remote-applied",
+                description:
+                  fromUserId && (!userId || fromUserId !== userId)
+                    ? "Another collaborator saved while you were editing."
+                    : undefined,
+                duration: 5500,
+              });
+            } catch (err) {
+              console.error(err);
+              toast.error("Couldn’t apply the latest version from the room.");
+            } finally {
+              blockSaveRef.current = false;
             }
           }
-        });
+        );
 
         socket.on("presence:cursor", (payload: RemoteCursor) => {
           if (!payload?.userId) return;
@@ -307,6 +470,11 @@ export default function TldrawEditor({
         );
       } catch (e) {
         console.warn("realtime connect skipped", e);
+        toast.warning("Live collaboration is unavailable right now.", {
+          id: "sheet-realtime-off",
+          description: "Your drawing still saves to the server. Try refreshing if others are on this note.",
+          duration: 8000,
+        });
       }
     }
 
@@ -317,7 +485,7 @@ export default function TldrawEditor({
       socket?.disconnect();
       socketRef.current = null;
     };
-  }, [sheetId, userColor, userName, userId, userImage]);
+  }, [sheetId, userColor, userName, userId, userImage, canWrite, flushCanvasSave, router]);
 
   const pageNav = useMemo(() => {
     void pageTick;
@@ -363,38 +531,14 @@ export default function TldrawEditor({
     void persistTitle(title);
   }, [persistTitle, title]);
 
-  const flushCanvasSave = useCallback(async () => {
-    const ed = editorRef.current;
-    if (!ed || blockSaveRef.current || !canWrite) return;
-    try {
-      const snapshot = getSnapshot(ed.store);
-      const res = await saveSheetState(sheetId, snapshot, undefined, versionRef.current);
-      if ("conflict" in res && res.conflict) {
-        console.warn("save conflict — refresh recommended");
-        return;
-      }
-      if ("contentVersion" in res && typeof res.contentVersion === "number") {
-        versionRef.current = res.contentVersion;
-      }
-      const sk = socketRef.current;
-      if (sk?.connected) {
-        sk.emit("sheet:snapshot", { sheetId, snapshot, contentVersion: versionRef.current });
-      }
-    } catch (e) {
-      console.error(e);
-      try {
-        const snapshot = getSnapshot(ed.store);
-        const q = ((await localforage.getItem<unknown[]>(queueKey(sheetId))) ?? []) as unknown[];
-        q.push({ snapshot, at: Date.now(), v: versionRef.current });
-        await localforage.setItem(queueKey(sheetId), q);
-      } catch {
-        /* offline queue best-effort */
-      }
-    }
-  }, [sheetId, canWrite]);
-
   const handleMount = useCallback(
     (ed: Editor) => {
+      allowLocalDirtyTrackingRef.current = false;
+      if (bootstrapDirtyTimerRef.current !== null) {
+        clearTimeout(bootstrapDirtyTimerRef.current);
+        bootstrapDirtyTimerRef.current = null;
+      }
+
       setEditor(ed);
       editorRef.current = ed;
 
@@ -420,6 +564,8 @@ export default function TldrawEditor({
         ed.store.listen(
           () => {
             if (blockSaveRef.current) return;
+            if (!allowLocalDirtyTrackingRef.current) return;
+            hasLocalEditsSinceLastPersistRef.current = true;
             clearTimeout(debounceTimer);
             debounceTimer = setTimeout(() => {
               if (blockSaveRef.current) return;
@@ -428,6 +574,12 @@ export default function TldrawEditor({
           },
           { source: "user", scope: "document" }
         );
+        bootstrapDirtyTimerRef.current = setTimeout(() => {
+          allowLocalDirtyTrackingRef.current = true;
+          bootstrapDirtyTimerRef.current = null;
+        }, 750);
+      } else {
+        allowLocalDirtyTrackingRef.current = true;
       }
     },
     [initialData, canWrite, flushCanvasSave]
@@ -464,11 +616,23 @@ export default function TldrawEditor({
       if (!item?.snapshot) return;
       try {
         const res = await saveSheetState(sheetId, item.snapshot, undefined, item.v ?? versionRef.current);
+        if ("conflict" in res && res.conflict) {
+          toast.error("Queued changes couldn’t be saved — the note changed on the server.", {
+            id: "sheet-queue-conflict",
+            description: "Reload to load the latest version. You may need to redo edits made while offline.",
+            duration: 16_000,
+            action: { label: "Reload", onClick: () => router.refresh() },
+          });
+          await localforage.setItem(queueKey(sheetId), []);
+          return;
+        }
         if ("contentVersion" in res && typeof res.contentVersion === "number") {
           versionRef.current = res.contentVersion;
         }
         next.shift();
         await localforage.setItem(queueKey(sheetId), next);
+        hasLocalEditsSinceLastPersistRef.current = false;
+        toast.success("Back online — queued changes were saved.", { id: "sheet-queue-synced", duration: 5000 });
       } catch {
         /* still offline */
       }
@@ -476,7 +640,7 @@ export default function TldrawEditor({
     void run();
     window.addEventListener("online", run);
     return () => window.removeEventListener("online", run);
-  }, [sheetId, canWrite]);
+  }, [sheetId, canWrite, router]);
 
   const goPage = (delta: -1 | 1) => {
     if (!editor) return;
@@ -532,6 +696,7 @@ export default function TldrawEditor({
 
   return (
     <div className="fixed inset-0 flex min-h-0 h-full w-full flex-col overscroll-none bg-[var(--bg-canvas)] pt-safe-top pb-safe-bottom">
+      <SheetVisitRecorder sheetId={sheetId} />
       <input
         ref={pdfInputRef}
         type="file"

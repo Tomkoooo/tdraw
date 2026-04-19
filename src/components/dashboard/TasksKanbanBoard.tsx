@@ -22,6 +22,8 @@ import {
   deleteTask,
   addBoardColumn,
 } from "@/lib/actions/task";
+import { toastActionError } from "@/lib/client/actionFeedback";
+
 export type BoardColumn = { id: string; title: string; order: number };
 
 export type KanbanTask = {
@@ -176,7 +178,8 @@ export default function TasksKanbanBoard({
     try {
       await moveTaskToColumn(taskId, destCol);
       router.refresh();
-    } catch {
+    } catch (e) {
+      toastActionError(e, { id: "task-move-column" });
       setLocalTasks(tasks);
     }
   };
@@ -200,14 +203,18 @@ export default function TasksKanbanBoard({
           className="min-h-[48px] rounded-2xl bg-[var(--color-accent)] px-5 text-sm font-semibold text-white"
           onClick={async () => {
             if (!newTitle.trim()) return;
-            await createTask({
-              scope,
-              organizationId: scope === "org" ? organizationId : undefined,
-              title: newTitle,
-              columnId: columns[0]?.id,
-            });
-            setNewTitle("");
-            router.refresh();
+            try {
+              await createTask({
+                scope,
+                organizationId: scope === "org" ? organizationId : undefined,
+                title: newTitle,
+                columnId: columns[0]?.id,
+              });
+              setNewTitle("");
+              router.refresh();
+            } catch (e) {
+              toastActionError(e, { id: "task-create" });
+            }
           }}
         >
           Add card
@@ -228,9 +235,13 @@ export default function TasksKanbanBoard({
             className="rounded-2xl border border-[var(--input-border)] bg-[var(--input-bg)] px-4 py-2 text-sm font-semibold"
             onClick={async () => {
               if (!newColTitle.trim()) return;
-              await addBoardColumn(scope, organizationId, newColTitle);
-              setNewColTitle("");
-              router.refresh();
+              try {
+                await addBoardColumn(scope, organizationId, newColTitle);
+                setNewColTitle("");
+                router.refresh();
+              } catch (e) {
+                toastActionError(e, { id: "task-add-column" });
+              }
             }}
           >
             Add
@@ -307,25 +318,33 @@ function TaskDetailDrawer({
   const [comment, setComment] = useState("");
 
   const save = async () => {
-    await updateTaskCard(task._id, {
-      title,
-      description,
-      dueAt: dueAt || null,
-      assigneeUserId: scope === "org" && !assignAll && assignee ? assignee : null,
-      assignedToAll: scope === "org" ? assignAll : false,
-      labels: labels
-        .split(",")
-        .map((s) => s.trim())
-        .filter(Boolean),
-    });
-    onSaved();
+    try {
+      await updateTaskCard(task._id, {
+        title,
+        description,
+        dueAt: dueAt || null,
+        assigneeUserId: scope === "org" && !assignAll && assignee ? assignee : null,
+        assignedToAll: scope === "org" ? assignAll : false,
+        labels: labels
+          .split(",")
+          .map((s) => s.trim())
+          .filter(Boolean),
+      });
+      onSaved();
+    } catch (e) {
+      toastActionError(e, { id: "task-card-save" });
+    }
   };
 
   const sendComment = async () => {
     if (!comment.trim()) return;
-    await addTaskComment(task._id, comment);
-    setComment("");
-    onSaved();
+    try {
+      await addTaskComment(task._id, comment);
+      setComment("");
+      onSaved();
+    } catch (e) {
+      toastActionError(e, { id: "task-card-comment" });
+    }
   };
 
   return (
@@ -347,10 +366,12 @@ function TaskDetailDrawer({
                 aria-label="Delete"
                 onClick={() => {
                   if (confirm("Delete this card?")) {
-                    void deleteTask(task._id).then(() => {
-                      onClose();
-                      onSaved();
-                    });
+                    void deleteTask(task._id)
+                      .then(() => {
+                        onClose();
+                        onSaved();
+                      })
+                      .catch((e) => toastActionError(e, { id: "task-card-delete" }));
                   }
                 }}
               >

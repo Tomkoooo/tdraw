@@ -9,6 +9,7 @@ import timeGridPlugin from "@fullcalendar/timegrid";
 import interactionPlugin from "@fullcalendar/interaction";
 import { Calendar, ChevronLeft, ChevronRight } from "lucide-react";
 import { createEvent, deleteEvent, updateEvent } from "@/lib/actions/calendar";
+import { toastActionError } from "@/lib/client/actionFeedback";
 
 type Ev = {
   _id: string;
@@ -119,23 +120,27 @@ export default function CalendarClient({
   const submitCreate = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!compose || !title.trim()) return;
-    await createEvent({
-      scope: compose.scope,
-      organizationId: compose.scope === "org" ? compose.orgId : undefined,
-      title,
-      description: description || undefined,
-      start: compose.start,
-      end: compose.end,
-      location: location || undefined,
-      reminderMinutesBefore: reminder > 0 ? reminder : null,
-      participantUserIds: compose.scope === "org" && participantIds.length ? participantIds : undefined,
-      guestEmails: guestEmails
-        .split(/[\n,]+/)
-        .map((s) => s.trim())
-        .filter(Boolean),
-    });
-    setCompose(null);
-    router.refresh();
+    try {
+      await createEvent({
+        scope: compose.scope,
+        organizationId: compose.scope === "org" ? compose.orgId : undefined,
+        title,
+        description: description || undefined,
+        start: compose.start,
+        end: compose.end,
+        location: location || undefined,
+        reminderMinutesBefore: reminder > 0 ? reminder : null,
+        participantUserIds: compose.scope === "org" && participantIds.length ? participantIds : undefined,
+        guestEmails: guestEmails
+          .split(/[\n,]+/)
+          .map((s) => s.trim())
+          .filter(Boolean),
+      });
+      setCompose(null);
+      router.refresh();
+    } catch (err) {
+      toastActionError(err, { id: "cal-create-event" });
+    }
   };
 
   const members = compose?.orgId ? orgMembersByOrg[compose.orgId] ?? [] : [];
@@ -366,10 +371,12 @@ export default function CalendarClient({
                     className="rounded-xl bg-red-600/90 px-4 py-2 text-sm font-semibold text-white"
                     onClick={() => {
                       if (confirm("Delete this event?")) {
-                        void deleteEvent(selected._id).then(() => {
-                          setSelected(null);
-                          router.refresh();
-                        });
+                        void deleteEvent(selected._id)
+                          .then(() => {
+                            setSelected(null);
+                            router.refresh();
+                          })
+                          .catch((err) => toastActionError(err, { id: "cal-delete-event" }));
                       }
                     }}
                   >
@@ -381,10 +388,12 @@ export default function CalendarClient({
                     onClick={() => {
                       const nt = prompt("New title", selected.title);
                       if (nt === null) return;
-                      void updateEvent(selected._id, { title: nt }).then(() => {
-                        setSelected(null);
-                        router.refresh();
-                      });
+                      void updateEvent(selected._id, { title: nt })
+                        .then(() => {
+                          setSelected(null);
+                          router.refresh();
+                        })
+                        .catch((err) => toastActionError(err, { id: "cal-rename-event" }));
                     }}
                   >
                     Rename

@@ -20,6 +20,7 @@ import {
 } from "@dnd-kit/sortable";
 import { CSS } from "@dnd-kit/utilities";
 import { GripVertical, Plus, X } from "lucide-react";
+import { toastActionError } from "@/lib/client/actionFeedback";
 
 function labelFor(id: string) {
   return id.replace(/-/g, " ");
@@ -164,6 +165,8 @@ export default function HotbarSettingsForm({
             try {
               await saveAction(ordered.length ? ordered : []);
               router.refresh();
+            } catch (e) {
+              toastActionError(e, { id: "settings-hotbar-save" });
             } finally {
               setSaving(false);
             }

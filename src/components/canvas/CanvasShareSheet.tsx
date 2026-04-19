@@ -32,7 +32,7 @@ export default function CanvasShareSheet({
     >
       <button
         type="button"
-        className="absolute inset-0 bg-black/45 backdrop-blur-sm"
+        className="absolute inset-0 z-0 cursor-pointer bg-black/45 backdrop-blur-sm transition-opacity hover:bg-black/50"
         aria-label="Dismiss"
         onClick={onClose}
       />
@@ -42,7 +42,7 @@ export default function CanvasShareSheet({
           <button
             type="button"
             onClick={onClose}
-            className="rounded-xl p-2 hover:bg-black/5 dark:hover:bg-white/10"
+            className="cursor-pointer rounded-xl p-2 transition-colors hover:bg-black/5 active:scale-95 dark:hover:bg-white/10 motion-reduce:active:scale-100"
             aria-label="Close"
           >
             <X className="h-5 w-5" />

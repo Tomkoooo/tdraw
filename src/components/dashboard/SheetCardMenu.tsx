@@ -4,6 +4,7 @@ import { useEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import { Info, MoreHorizontal, Pencil, Pin, PinOff, Share2, Trash2 } from "lucide-react";
 import { moveSheetToTrash, setSheetPinned, updateSheetTitle } from "@/lib/actions/sheet";
+import { toastActionError } from "@/lib/client/actionFeedback";
 import { useRouter } from "next/navigation";
 import SheetShareForm from "@/components/SheetShareForm";
 import SheetInfoModal from "@/components/dashboard/SheetInfoModal";
@@ -64,7 +65,7 @@ export default function SheetCardMenu({
       setOpen(false);
       router.refresh();
     } catch (e) {
-      alert(e instanceof Error ? e.message : "Failed");
+      toastActionError(e, { id: "sheet-menu-pin" });
     }
   };
 
@@ -75,7 +76,7 @@ export default function SheetCardMenu({
       setOpen(false);
       router.refresh();
     } catch (e) {
-      alert(e instanceof Error ? e.message : "Failed");
+      toastActionError(e, { id: "sheet-menu-trash" });
     }
   };
 
@@ -87,7 +88,7 @@ export default function SheetCardMenu({
       setOpen(false);
       router.refresh();
     } catch (err) {
-      alert(err instanceof Error ? err.message : "Failed");
+      toastActionError(err, { id: "sheet-menu-rename" });
     }
   };
 
@@ -179,13 +180,21 @@ export default function SheetCardMenu({
       {typeof document !== "undefined" && shareOpen
         ? createPortal(
             <div className="fixed inset-0 z-[100] flex items-end justify-center p-4 sm:items-center">
-              <button type="button" className="absolute inset-0 bg-black/50 backdrop-blur-sm" onClick={() => setShareOpen(false)} />
-              <div className="glass-menu relative z-10 max-h-[90vh] w-full max-w-md overflow-y-auto rounded-[1.75rem] p-6 shadow-2xl">
+              <button
+                type="button"
+                className="absolute inset-0 z-0 cursor-pointer bg-black/50 backdrop-blur-sm transition-opacity hover:bg-black/55"
+                onClick={() => setShareOpen(false)}
+                aria-label="Close share"
+              />
+              <div
+                className="glass-menu relative z-10 max-h-[90vh] w-full max-w-md overflow-y-auto rounded-[1.75rem] p-6 shadow-2xl"
+                onClick={(e) => e.stopPropagation()}
+              >
                 <div className="mb-4 flex items-center justify-between gap-2">
                   <h2 className="text-lg font-bold tracking-tight">Share note</h2>
                   <button
                     type="button"
-                    className="rounded-full px-3 py-1.5 text-sm font-semibold hover:bg-black/5 dark:hover:bg-white/10"
+                    className="cursor-pointer rounded-full px-3 py-1.5 text-sm font-semibold transition-colors hover:bg-black/5 active:scale-95 dark:hover:bg-white/10 motion-reduce:active:scale-100"
                     onClick={() => setShareOpen(false)}
                   >
                     Done

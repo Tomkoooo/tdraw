@@ -3,6 +3,7 @@ import Script from "next/script";
 import "./globals.css";
 import SessionProvider from "@/components/SessionProvider";
 import ThemeProvider from "@/components/ThemeProvider";
+import AppToaster from "@/components/AppToaster";
 import GlobalAppChrome from "@/components/GlobalAppChrome";
 import ServiceWorkerRegister from "@/components/ServiceWorkerRegister";
 import { getSiteUrl } from "@/lib/siteUrl";
@@ -74,6 +75,7 @@ export default function RootLayout({
           {`(function(){try{var k='tdraw-theme';var m=localStorage.getItem(k);var d=window.matchMedia('(prefers-color-scheme:dark)').matches;var r=m==='light'?'light':m==='dark'?'dark':d?'dark':'light';document.documentElement.setAttribute('data-theme',r);}catch(e){document.documentElement.setAttribute('data-theme','light');}})();`}
         </Script>
         <ThemeProvider>
+          <AppToaster />
           <SessionProvider>
             <ServiceWorkerRegister />
             <GlobalAppChrome>{children}</GlobalAppChrome>

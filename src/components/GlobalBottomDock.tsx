@@ -5,6 +5,7 @@ import { usePathname, useRouter } from "next/navigation";
 import { useEffect, useState } from "react";
 import { CalendarDays, Calculator, CheckSquare, Loader2, Plus } from "lucide-react";
 import { createSheet } from "@/lib/actions/sheet";
+import { toastActionError } from "@/lib/client/actionFeedback";
 import { useCalculator } from "@/context/CalculatorContext";
 
 export default function GlobalBottomDock() {
@@ -60,6 +61,8 @@ export default function GlobalBottomDock() {
                       const id = await createSheet();
                       setFabOpen(false);
                       router.push(`/sheet/${id}`);
+                    } catch (e) {
+                      toastActionError(e, { id: "dock-create-sheet" });
                     } finally {
                       setFabBusy(false);
                     }

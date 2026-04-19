@@ -24,6 +24,7 @@ import { Folder as FolderIcon, GripVertical, Pencil, Pin } from "lucide-react";
 import { reorderMyDriveSheets } from "@/lib/actions/sheet";
 import { reorderPersonalFolders, setFolderPinned } from "@/lib/actions/folder";
 import { useRouter } from "next/navigation";
+import { toastActionError } from "@/lib/client/actionFeedback";
 import SheetCardMenu from "@/components/dashboard/SheetCardMenu";
 import type { FolderRow, SheetCard } from "@/components/dashboard/driveTypes";
 
@@ -147,7 +148,7 @@ function SortableFolderChip({ folder }: { folder: FolderRow }) {
       await setFolderPinned(folder._id, !folder.pinned);
       router.refresh();
     } catch (err) {
-      alert(err instanceof Error ? err.message : "Failed");
+      toastActionError(err, { id: "drive-folder-pin" });
     }
   };
 
@@ -206,7 +207,8 @@ export function SortablePersonalFolders({
     try {
       await reorderPersonalFolders(next.map((f) => f._id));
       router.refresh();
-    } catch {
+    } catch (e) {
+      toastActionError(e, { id: "drive-reorder-folders" });
       onOrderChange(folders);
     }
   };
@@ -265,7 +267,8 @@ export function SortableMyDriveSheets({
     try {
       await reorderMyDriveSheets(next.map((s) => s._id));
       router.refresh();
-    } catch {
+    } catch (e) {
+      toastActionError(e, { id: "drive-reorder-sheets" });
       onOrderChange(sheets);
     }
   };

@@ -22,6 +22,7 @@ import Link from "next/link";
 import { GripVertical, Pencil } from "lucide-react";
 import { reorderOrgSheets } from "@/lib/actions/sheet";
 import { useRouter } from "next/navigation";
+import { toastActionError } from "@/lib/client/actionFeedback";
 import SheetCardMenu from "@/components/dashboard/SheetCardMenu";
 import type { SheetCard } from "@/components/dashboard/driveTypes";
 import type { DocEditActivity } from "@/components/realtime/OrgWorkspaceRealtime";
@@ -179,7 +180,8 @@ export default function OrgSheetsSortable({
     try {
       await reorderOrgSheets(organizationId, next.map((s) => s._id));
       router.refresh();
-    } catch {
+    } catch (e) {
+      toastActionError(e, { id: "org-reorder-sheets" });
       onOrderChange(sheets);
     }
   };

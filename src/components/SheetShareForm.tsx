@@ -1,9 +1,16 @@
 "use client";
 
-import { useState } from "react";
-import { createSheetInvite } from "@/lib/actions/share";
+import { useCallback, useEffect, useState } from "react";
+import {
+  createSheetInvite,
+  listSheetInvites,
+  type CreateSheetInviteResult,
+} from "@/lib/actions/share";
 import { Loader2, Mail } from "lucide-react";
 import UserAvatar from "@/components/UserAvatar";
+import InviteListPanel from "@/components/InviteListPanel";
+import { toast } from "sonner";
+import { readActionErrorMessage } from "@/lib/client/actionFeedback";
 
 type ShareRole = "reader" | "editor" | "author";
 
@@ -13,6 +20,12 @@ const TTL_OPTIONS = [
   { h: 72, label: "3d" },
   { h: 168, label: "7d" },
 ] as const;
+
+const chipBase =
+  "cursor-pointer select-none rounded-full px-4 py-2 text-xs font-semibold capitalize transition-[transform,box-shadow,opacity] active:scale-[0.97] motion-reduce:transition-none motion-reduce:active:scale-100 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[var(--color-accent)]";
+
+const ttlChipBase =
+  "cursor-pointer select-none min-h-[44px] min-w-[3.25rem] rounded-2xl px-3 text-sm font-semibold transition-[transform,box-shadow,opacity] active:scale-[0.98] motion-reduce:transition-none motion-reduce:active:scale-100 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[var(--color-accent)]";
 
 export default function SheetShareForm({
   sheetId,
@@ -29,24 +42,100 @@ export default function SheetShareForm({
   const [ttlHours, setTtlHours] = useState<number>(48);
   const [busy, setBusy] = useState(false);
   const [msg, setMsg] = useState<string | null>(null);
+  const [inviteRefresh, setInviteRefresh] = useState(0);
+  const [showExpiredInvites, setShowExpiredInvites] = useState(false);
+  const [inviteRows, setInviteRows] = useState<
+    Awaited<ReturnType<typeof listSheetInvites>>["items"]
+  >([]);
+  const [hiddenExpiredCount, setHiddenExpiredCount] = useState(0);
+  const [invitesLoading, setInvitesLoading] = useState(true);
+  const [invitesError, setInvitesError] = useState<string | null>(null);
+
+  const loadInvites = useCallback(
+    async (signal?: AbortSignal) => {
+      setInvitesLoading(true);
+      setInvitesError(null);
+      try {
+        const { items, hiddenExpiredCount: hidden } = await listSheetInvites(sheetId, {
+          includeExpired: showExpiredInvites,
+        });
+        if (signal?.aborted) return;
+        setInviteRows(items);
+        setHiddenExpiredCount(hidden);
+      } catch (err: unknown) {
+        if (signal?.aborted) return;
+        setInvitesError(readActionErrorMessage(err));
+      } finally {
+        if (!signal?.aborted) setInvitesLoading(false);
+      }
+    },
+    [sheetId, showExpiredInvites]
+  );
+
+  useEffect(() => {
+    const ac = new AbortController();
+    const tid = setTimeout(() => {
+      void loadInvites(ac.signal);
+    }, 0);
+    return () => {
+      ac.abort();
+      clearTimeout(tid);
+    };
+  }, [loadInvites, inviteRefresh]);
+
+  const trimmed = email.trim();
+  const emailLooksValid = /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(trimmed);
+  const canSubmit = !busy && emailLooksValid;
 
   const submit = async (e: React.FormEvent) => {
     e.preventDefault();
+    if (!canSubmit) return;
     setBusy(true);
     setMsg(null);
     try {
-      await createSheetInvite(sheetId, email, role as "reader" | "editor" | "author", allowForward, ttlHours);
-      setMsg("Invitation sent (or logged if email is not configured).");
+      const res: CreateSheetInviteResult = await createSheetInvite(
+        sheetId,
+        trimmed,
+        role as "reader" | "editor" | "author",
+        allowForward,
+        ttlHours
+      );
       setEmail("");
+      if (res.emailStatus === "sent") {
+        const line = `Invitation sent to ${trimmed}.`;
+        setMsg(line);
+        toast.success(line, { id: "sheet-invite-sent", duration: 6000 });
+      } else if (res.emailStatus === "skipped") {
+        const line =
+          "Invite saved. Email was not sent (SMTP not configured) — check the server log for the invite link.";
+        setMsg(line);
+        toast.message("Invite created (no email)", {
+          id: "sheet-invite-skip",
+          description: "Configure SMTP_HOST in the server environment to send mail.",
+          duration: 12_000,
+        });
+      } else {
+        const line =
+          "Invite saved, but the email server rejected or timed out the message. The recipient can still use a link you copy from server logs if you re-send after fixing SMTP.";
+        setMsg(line);
+        toast.warning("Invite saved — email delivery failed", {
+          id: "sheet-invite-mail-fail",
+          description: "Check SMTP settings and server logs.",
+          duration: 12_000,
+        });
+      }
+      setInviteRefresh((n) => n + 1);
     } catch (err: unknown) {
-      setMsg(err instanceof Error ? err.message : "Failed");
+      const m = readActionErrorMessage(err);
+      setMsg(m);
+      toast.error(m, { id: "sheet-invite-err", duration: 10_000 });
     } finally {
       setBusy(false);
     }
   };
 
   return (
-    <form onSubmit={(e) => void submit(e)} className="flex flex-col gap-5">
+    <form onSubmit={(e) => void submit(e)} className="flex flex-col gap-5" aria-busy={busy}>
       {(inviterName || inviterImage) && (
         <div className="flex items-center gap-3 border-b border-[var(--glass-border)] pb-4">
           <UserAvatar image={inviterImage} name={inviterName} size="sm" />
@@ -66,7 +155,7 @@ export default function SheetShareForm({
         value={email}
         onChange={(e) => setEmail(e.target.value)}
         placeholder="colleague@company.com"
-        className="min-h-[48px] rounded-2xl border border-[var(--glass-border)] bg-white/70 px-4 py-3 text-sm dark:bg-black/35"
+        className="min-h-[48px] cursor-text rounded-2xl border border-[var(--glass-border)] bg-white/70 px-4 py-3 text-sm transition-shadow focus:border-[var(--color-accent)]/40 focus:shadow-[0_0_0_3px_color-mix(in_srgb,var(--color-accent)_22%,transparent)] focus:outline-none dark:bg-black/35"
       />
       <div>
         <p className="mb-2 text-xs font-semibold uppercase tracking-wide text-gray-500 dark:text-gray-400">Role</p>
@@ -76,10 +165,11 @@ export default function SheetShareForm({
               key={r}
               type="button"
               onClick={() => setRole(r)}
-              className={`rounded-full px-4 py-2 text-xs font-semibold capitalize transition-all ${
+              disabled={busy}
+              className={`${chipBase} disabled:cursor-not-allowed disabled:opacity-45 ${
                 role === r
-                  ? "bg-[var(--color-accent)] text-white shadow-md"
-                  : "glass-panel hover:opacity-90"
+                  ? "bg-[var(--color-accent)] text-white shadow-md hover:brightness-110"
+                  : "glass-panel hover:bg-black/[0.06] dark:hover:bg-white/[0.08]"
               }`}
             >
               {r}
@@ -97,8 +187,11 @@ export default function SheetShareForm({
               key={h}
               type="button"
               onClick={() => setTtlHours(h)}
-              className={`min-h-[44px] min-w-[3.25rem] rounded-2xl px-3 text-sm font-semibold ${
-                ttlHours === h ? "bg-[var(--color-accent)] text-white shadow-sm" : "glass-panel"
+              disabled={busy}
+              className={`${ttlChipBase} disabled:cursor-not-allowed disabled:opacity-45 ${
+                ttlHours === h
+                  ? "bg-[var(--color-accent)] text-white shadow-sm hover:brightness-110"
+                  : "glass-panel hover:bg-black/[0.06] dark:hover:bg-white/[0.08]"
               }`}
             >
               {label}
@@ -111,19 +204,47 @@ export default function SheetShareForm({
           type="checkbox"
           checked={allowForward}
           onChange={(e) => setAllowForward(e.target.checked)}
-          className="h-4 w-4 rounded border-gray-300"
+          disabled={busy}
+          className="h-4 w-4 cursor-pointer rounded border-gray-300 disabled:cursor-not-allowed disabled:opacity-45"
         />
         Allow recipient to share forward
       </label>
       <button
         type="submit"
-        disabled={busy}
-        className="inline-flex min-h-[48px] items-center justify-center gap-2 rounded-2xl bg-[var(--color-accent)] py-3 text-sm font-semibold text-white disabled:opacity-50"
+        disabled={!canSubmit}
+        className="inline-flex min-h-[48px] cursor-pointer items-center justify-center gap-2 rounded-2xl bg-[var(--color-accent)] py-3 text-sm font-semibold text-white shadow-md transition-[transform,filter,opacity] hover:brightness-110 active:scale-[0.98] disabled:cursor-not-allowed disabled:bg-gray-400 disabled:text-white/90 disabled:opacity-70 disabled:shadow-none disabled:hover:brightness-100 motion-reduce:active:scale-100"
       >
-        {busy ? <Loader2 className="h-4 w-4 animate-spin" /> : null}
+        {busy ? <Loader2 className="h-4 w-4 shrink-0 animate-spin" aria-hidden /> : null}
         Send invite
       </button>
-      {msg ? <p className="text-xs text-gray-600 dark:text-gray-400">{msg}</p> : null}
+      {!emailLooksValid && trimmed.length > 0 ? (
+        <p className="text-xs font-medium text-amber-800 dark:text-amber-200">Enter a valid email address.</p>
+      ) : null}
+      {msg ? (
+        <p className="rounded-xl border border-[var(--glass-border)] bg-black/[0.03] px-3 py-2 text-xs leading-relaxed text-gray-700 dark:bg-white/[0.06] dark:text-gray-200">
+          {msg}
+        </p>
+      ) : null}
+
+      <InviteListPanel
+        key={sheetId}
+        title="Invitations for this note"
+        loading={invitesLoading}
+        error={invitesError}
+        rows={inviteRows.map((i) => ({
+          email: i.email,
+          role: i.role,
+          status: i.status,
+          expiresAt: i.expiresAt,
+          acceptedAt: i.acceptedAt,
+          detail: i.allowForwardShare ? "Recipient may share forward" : null,
+        }))}
+        showExpired={showExpiredInvites}
+        hiddenExpiredCount={hiddenExpiredCount}
+        onShowExpiredChange={(next) => {
+          setShowExpiredInvites(next);
+        }}
+      />
     </form>
   );
 }

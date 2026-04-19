@@ -2,6 +2,7 @@
 
 import { useCallback, useEffect, useState, type ReactNode } from "react";
 import { createPortal } from "react-dom";
+import { toastActionError } from "@/lib/client/actionFeedback";
 
 export default function ConfirmDialog({
   open,
@@ -25,7 +26,7 @@ export default function ConfirmDialog({
   const [busy, setBusy] = useState(false);
 
   useEffect(() => {
-    if (!open) setBusy(false);
+    if (!open) queueMicrotask(() => setBusy(false));
   }, [open]);
 
   const handleConfirm = useCallback(async () => {
@@ -34,8 +35,8 @@ export default function ConfirmDialog({
     try {
       await onConfirm();
       onClose();
-    } catch {
-      /* keep open; caller may surface error */
+    } catch (e) {
+      toastActionError(e, { id: "confirm-dialog-action" });
     } finally {
       setBusy(false);
     }

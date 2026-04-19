@@ -23,6 +23,33 @@ function clampInviteTtlHours(requested?: number) {
   return Math.min(168, Math.max(1, Math.round(requested)));
 }
 
+export type CreateSheetInviteResult = {
+  ok: true;
+  emailStatus: "sent" | "skipped" | "failed";
+};
+
+export type SheetInviteListStatus = "pending" | "accepted" | "expired";
+
+export type SheetInviteListItem = {
+  email: string;
+  role: SheetShareRole;
+  allowForwardShare: boolean;
+  expiresAt: string;
+  acceptedAt: string | null;
+  createdAt: string;
+  status: SheetInviteListStatus;
+};
+
+function sheetInviteStatus(
+  acceptedAt: Date | undefined | null,
+  expiresAt: Date,
+  now: Date
+): SheetInviteListStatus {
+  if (acceptedAt) return "accepted";
+  if (expiresAt.getTime() <= now.getTime()) return "expired";
+  return "pending";
+}
+
 export async function createSheetInvite(
   sheetId: string,
   email: string,
@@ -30,11 +57,18 @@ export async function createSheetInvite(
   allowForwardShare: boolean,
   /** Hours until invite expires (1–168). Omit to use env default. */
   ttlHours?: number
-) {
+): Promise<CreateSheetInviteResult> {
   const session = await auth();
   if (!session?.user?.id) throw new Error("Unauthorized");
   await dbConnect();
-  await requireSheetPermission(session.user.id, sheetId, "share");
+  try {
+    await requireSheetPermission(session.user.id, sheetId, "share");
+  } catch (e) {
+    if (e instanceof Error && e.message === "Forbidden") {
+      throw new Error("You don’t have permission to invite others to this note.");
+    }
+    throw e;
+  }
 
   const normalized = email.trim().toLowerCase();
   if (!normalized.includes("@")) throw new Error("Invalid email");
@@ -65,15 +99,21 @@ export async function createSheetInvite(
   const origin = base.startsWith("http") ? base : `https://${base}`;
   const link = `${origin}/invite/sheet/${raw}`;
 
-  await sendInviteEmail({
+  const mail = await sendInviteEmail({
     to: normalized,
     subject: `You're invited to "${sheet?.title ?? "a note"}" on tDraw`,
     html: `<p>You have been invited with role: <strong>${role}</strong>.</p><p><a href="${link}">Open invitation</a></p><p>This link expires at ${expiresAt.toISOString()}.</p>`,
   });
 
+  const emailStatus: CreateSheetInviteResult["emailStatus"] = mail.skipped
+    ? "skipped"
+    : mail.ok
+      ? "sent"
+      : "failed";
+
   revalidatePath("/dashboard");
   revalidatePath(`/sheet/${sheetId}`);
-  return { ok: true as const };
+  return { ok: true as const, emailStatus };
 }
 
 export async function acceptSheetInviteByToken(rawToken: string) {
@@ -110,8 +150,10 @@ export async function acceptSheetInviteByToken(rawToken: string) {
     { $set: { acceptedAt: new Date(), acceptedByUserId: new mongoose.Types.ObjectId(session.user.id) } }
   );
 
+  const sid = String(inv.sheetId);
   revalidatePath("/dashboard");
-  return { sheetId: String(inv.sheetId) };
+  revalidatePath(`/sheet/${sid}`);
+  return { sheetId: sid };
 }
 
 export async function listPendingSheetInvites(sheetId: string) {
@@ -134,6 +176,53 @@ export async function listPendingSheetInvites(sheetId: string) {
     allowForwardShare: i.allowForwardShare,
     expiresAt: i.expiresAt.toISOString(),
   }));
+}
+
+const SHEET_INVITE_LIST_LIMIT = 120;
+
+/** Invitations for this sheet (newest first). Expired rows omitted unless `includeExpired`. */
+export async function listSheetInvites(
+  sheetId: string,
+  opts?: { includeExpired?: boolean }
+): Promise<{ items: SheetInviteListItem[]; hiddenExpiredCount: number }> {
+  const session = await auth();
+  if (!session?.user?.id) throw new Error("Unauthorized");
+  await dbConnect();
+  try {
+    await requireSheetPermission(session.user.id, sheetId, "share");
+  } catch (e) {
+    if (e instanceof Error && e.message === "Forbidden") {
+      throw new Error("You don’t have permission to view invitations for this note.");
+    }
+    throw e;
+  }
+
+  const includeExpired = Boolean(opts?.includeExpired);
+  const raw = await SheetInvitation.find({ sheetId: new mongoose.Types.ObjectId(sheetId) })
+    .select("email role allowForwardShare expiresAt acceptedAt createdAt")
+    .sort({ createdAt: -1 })
+    .limit(SHEET_INVITE_LIST_LIMIT)
+    .lean();
+
+  const now = new Date();
+  const mapped: SheetInviteListItem[] = raw.map((i) => {
+    const acceptedAt = i.acceptedAt ?? null;
+    const status = sheetInviteStatus(acceptedAt, i.expiresAt, now);
+    return {
+      email: i.email,
+      role: i.role as SheetShareRole,
+      allowForwardShare: Boolean(i.allowForwardShare),
+      expiresAt: i.expiresAt.toISOString(),
+      acceptedAt: acceptedAt ? acceptedAt.toISOString() : null,
+      createdAt: (i.createdAt ?? i.expiresAt).toISOString(),
+      status,
+    };
+  });
+
+  const hiddenExpiredCount = mapped.filter((m) => m.status === "expired").length;
+  const items = includeExpired ? mapped : mapped.filter((m) => m.status !== "expired");
+
+  return { items, hiddenExpiredCount: includeExpired ? 0 : hiddenExpiredCount };
 }
 
 /** Verify raw token for invite page (does not accept). */

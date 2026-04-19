@@ -5,6 +5,7 @@ import {
   Building2,
   CalendarDays,
   CheckSquare,
+  History,
   LayoutGrid,
   List,
   MoreHorizontal,
@@ -28,10 +29,29 @@ import { SortableMyDriveSheets, SortablePersonalFolders, type FolderRow, type Sh
 import OrgSheetsSortable from "./OrgSheetsSortable";
 import SheetCardMenu from "./SheetCardMenu";
 import OrgWorkspaceRealtime, { type DocEditActivity, type OnlineMember } from "@/components/realtime/OrgWorkspaceRealtime";
+import { toastActionError } from "@/lib/client/actionFeedback";
+import { readSheetVisits, SHEET_VISIT_STORAGE_KEY, type SheetVisitEntry } from "@/lib/client/sheetVisitLog";
 
 type OrgRow = { _id: string; name: string; role: string; createdByUserId: string };
 
-type Segment = "drive" | "shared" | "orgs" | "trash";
+type Segment = "recent" | "drive" | "shared" | "orgs" | "trash";
+
+type RecentKind = "personal" | "shared_with" | "shared_by" | "org";
+
+type RecentRow = SheetCard & {
+  recentKind: RecentKind;
+  sharedRole?: string;
+  orgId?: string;
+  orgName?: string;
+};
+
+const RECENT_LIST_CAP = 48;
+
+function recentActivityMs(sheet: SheetCard, visits: Record<string, SheetVisitEntry>) {
+  const updated = new Date(sheet.updatedAt).getTime();
+  const v = visits[sheet._id];
+  return Math.max(updated, v?.lastVisitMs ?? 0);
+}
 type SharedSub = "with" | "by";
 type DriveSort = "alpha" | "created" | "updated";
 
@@ -68,6 +88,19 @@ function EmptyShared() {
       </div>
       <p className="text-sm leading-relaxed text-gray-500 dark:text-gray-400">
         Invited notes show up here with your role. Ask a collaborator to share a sheet with your email.
+      </p>
+    </div>
+  );
+}
+
+function EmptyRecent() {
+  return (
+    <div className="glass-panel mx-auto flex max-w-md flex-col items-center gap-5 px-8 py-12 text-center">
+      <div className="flex h-20 w-20 items-center justify-center rounded-3xl bg-[var(--color-accent)]/10 text-[var(--color-accent)]">
+        <History className="h-9 w-9" strokeWidth={1.25} />
+      </div>
+      <p className="text-sm leading-relaxed text-gray-500 dark:text-gray-400">
+        Open any note to build this list. We rank by your last visit and recent edits (including shared and org notes).
       </p>
     </div>
   );
@@ -122,6 +155,7 @@ export default function DashboardClient(props: {
   const pathname = usePathname() ?? "";
 
   const [segment, setSegment] = useState<Segment>("drive");
+  const [visitLog, setVisitLog] = useState<Record<string, SheetVisitEntry>>({});
   const [sharedSub, setSharedSub] = useState<SharedSub>("with");
   const [q, setQ] = useState("");
   const [view, setView] = useState<"grid" | "list">("grid");
@@ -174,6 +208,26 @@ export default function DashboardClient(props: {
 
   useEffect(() => {
     queueMicrotask(() => setMoreOpen(false));
+  }, [pathname]);
+
+  useEffect(() => {
+    const sync = () => setVisitLog(readSheetVisits());
+    sync();
+    const onStorage = (e: StorageEvent) => {
+      if (e.key === null || e.key === SHEET_VISIT_STORAGE_KEY) sync();
+    };
+    const onVisit = () => sync();
+    const onVis = () => {
+      if (document.visibilityState === "visible") sync();
+    };
+    window.addEventListener("storage", onStorage);
+    window.addEventListener("tdraw:sheet-visit", onVisit);
+    document.addEventListener("visibilitychange", onVis);
+    return () => {
+      window.removeEventListener("storage", onStorage);
+      window.removeEventListener("tdraw:sheet-visit", onVisit);
+      document.removeEventListener("visibilitychange", onVis);
+    };
   }, [pathname]);
 
   const sheetMenuBase = useMemo(
@@ -245,14 +299,52 @@ export default function DashboardClient(props: {
     return orgSheets.filter((s) => s.title.toLowerCase().includes(t));
   }, [orgTab, orgSheetOrder, orgSheetsByOrg, q]);
 
+  const unifiedRecentRows = useMemo(() => {
+    const byId = new Map<string, RecentRow>();
+    for (const org of orgs) {
+      const sheets = orgSheetOrder[org._id] ?? orgSheetsByOrg[org._id] ?? [];
+      for (const s of sheets) {
+        byId.set(s._id, { ...s, recentKind: "org", orgId: org._id, orgName: org.name });
+      }
+    }
+    for (const s of mineOrder) {
+      if (byId.has(s._id)) continue;
+      byId.set(s._id, { ...s, recentKind: "personal" });
+    }
+    for (const s of shared) {
+      if (byId.has(s._id)) continue;
+      byId.set(s._id, { ...s, recentKind: "shared_with", sharedRole: s.role });
+    }
+    for (const s of sharedByMe) {
+      if (byId.has(s._id)) continue;
+      byId.set(s._id, { ...s, recentKind: "shared_by" });
+    }
+    return Array.from(byId.values());
+  }, [orgs, orgSheetOrder, orgSheetsByOrg, mineOrder, shared, sharedByMe]);
+
+  const filteredRecent = useMemo(() => {
+    const t = q.trim().toLowerCase();
+    const base = t ? unifiedRecentRows.filter((s) => s.title.toLowerCase().includes(t)) : [...unifiedRecentRows];
+    base.sort((a, b) => {
+      const primary = recentActivityMs(b, visitLog) - recentActivityMs(a, visitLog);
+      if (primary !== 0) return primary;
+      const ca = visitLog[a._id]?.count ?? 0;
+      const cb = visitLog[b._id]?.count ?? 0;
+      return cb - ca;
+    });
+    return base.slice(0, RECENT_LIST_CAP);
+  }, [unifiedRecentRows, visitLog, q]);
+
   const segmentLabel =
-    segment === "drive"
-      ? "My Drive"
-      : segment === "shared"
-        ? "Shared"
-        : segment === "trash"
-          ? "Trash"
-          : "Organizations";
+    segment === "recent"
+      ? "Recent"
+      : segment === "drive"
+        ? "My Drive"
+        : segment === "shared"
+          ? "Shared"
+          : segment === "trash"
+            ? "Trash"
+            : "Organizations";
 
   const currentOrgRole = orgs.find((o) => o._id === orgTab)?.role ?? "member";
 
@@ -337,6 +429,7 @@ export default function DashboardClient(props: {
           <div className="mt-4 flex w-full gap-1 rounded-[1.35rem] bg-black/[0.04] p-1 dark:bg-white/[0.06]">
             {(
               [
+                ["recent", "Recent"],
                 ["drive", "Drive"],
                 ["shared", "Shared"],
                 ["orgs", "Orgs"],
@@ -403,6 +496,101 @@ export default function DashboardClient(props: {
       </header>
 
       <main className="flex-1 px-3 py-6 md:px-6">
+        {segment === "recent" ? (
+          <div className="mx-auto max-w-6xl space-y-3">
+            <p className="text-center text-xs text-gray-500 dark:text-gray-400">
+              Sorted by your last visit and recent edits. Up to {RECENT_LIST_CAP} notes.
+            </p>
+            {unifiedRecentRows.length === 0 ? (
+              <EmptyRecent />
+            ) : filteredRecent.length === 0 ? (
+              <p className="text-center text-sm text-gray-500">No notes match your search.</p>
+            ) : (
+              <div
+                className={
+                  view === "grid"
+                    ? "grid grid-cols-2 gap-4 md:grid-cols-3 lg:grid-cols-4"
+                    : "flex flex-col gap-2"
+                }
+              >
+                {filteredRecent.map((sheet) => {
+                  const badge =
+                    sheet.recentKind === "org"
+                      ? sheet.orgName ?? "Organization"
+                      : sheet.recentKind === "shared_with"
+                        ? `Shared · ${sheet.sharedRole ?? "reader"}`
+                        : sheet.recentKind === "shared_by"
+                          ? "You invited others"
+                          : "Personal";
+                  const FallbackIcon =
+                    sheet.recentKind === "org" ? Building2 : sheet.recentKind === "personal" ? Pencil : Share2;
+                  const menuVariant =
+                    sheet.recentKind === "personal"
+                      ? ("personal" as const)
+                      : sheet.recentKind === "org"
+                        ? ("org" as const)
+                        : sheet.recentKind === "shared_by"
+                          ? ("sharedByMe" as const)
+                          : null;
+                  const orgRole = sheet.orgId ? (orgs.find((o) => o._id === sheet.orgId)?.role ?? "member") : undefined;
+                  const showMenu = sheetMenuBase && menuVariant;
+                  return view === "grid" ? (
+                    <div key={sheet._id} className="relative aspect-[4/3] min-h-0">
+                      {showMenu ? (
+                        <div className="absolute left-2 top-2 z-10" onClick={(e) => e.preventDefault()}>
+                          <SheetCardMenu
+                            sheet={sheet}
+                            variant={menuVariant}
+                            orgRole={orgRole}
+                            {...sheetMenuBase}
+                          />
+                        </div>
+                      ) : null}
+                      <Link
+                        href={`/sheet/${sheet._id}`}
+                        className={`glass-panel flex h-full flex-col overflow-hidden p-4 shadow-sm transition-transform hover:scale-[1.01] active:scale-[0.99] ${showMenu ? "pt-11" : ""}`}
+                      >
+                        <div className="mb-2 flex flex-1 items-center justify-center overflow-hidden rounded-2xl bg-white/45 dark:bg-black/20">
+                          {sheet.previewImage ? (
+                            <img src={sheet.previewImage} alt="" className="h-full w-full object-cover" />
+                          ) : (
+                            <FallbackIcon className="h-9 w-9 text-gray-300 dark:text-gray-600" />
+                          )}
+                        </div>
+                        <h3 className="truncate text-sm font-semibold">{sheet.title}</h3>
+                        <p className="truncate text-[11px] font-medium text-gray-500 dark:text-gray-400">{badge}</p>
+                      </Link>
+                    </div>
+                  ) : (
+                    <div key={sheet._id} className="glass-panel flex items-center gap-3 p-3">
+                      <Link href={`/sheet/${sheet._id}`} className="flex min-w-0 flex-1 items-center gap-4">
+                        <div className="flex h-14 w-[4.5rem] shrink-0 overflow-hidden rounded-xl bg-white/50 dark:bg-black/25">
+                          {sheet.previewImage ? (
+                            <img src={sheet.previewImage} alt="" className="h-full w-full object-cover" />
+                          ) : (
+                            <span className="flex h-full w-full items-center justify-center">
+                              <FallbackIcon className="h-5 w-5 text-gray-400" />
+                            </span>
+                          )}
+                        </div>
+                        <div className="min-w-0 flex-1">
+                          <h3 className="truncate font-semibold">{sheet.title}</h3>
+                          <p className="truncate text-xs font-medium text-gray-500 dark:text-gray-400">{badge}</p>
+                        </div>
+                      </Link>
+                      {showMenu ? (
+                        <div className="shrink-0" onClick={(e) => e.preventDefault()}>
+                          <SheetCardMenu sheet={sheet} variant={menuVariant} orgRole={orgRole} {...sheetMenuBase} />
+                        </div>
+                      ) : null}
+                    </div>
+                  );
+                })}
+              </div>
+            )}
+          </div>
+        ) : null}
+
         {segment === "drive" ? (
           <div className="mx-auto flex max-w-6xl flex-col gap-6">
             <div className="glass-panel flex flex-wrap items-center justify-between gap-3 rounded-2xl px-4 py-3 text-sm">
@@ -622,7 +810,11 @@ export default function DashboardClient(props: {
                         <button
                           type="button"
                           className="rounded-xl bg-[var(--color-accent)]/15 px-3 py-1.5 text-xs font-semibold text-[var(--color-accent)]"
-                          onClick={() => void restoreFolderFromTrash(f._id).then(() => router.refresh())}
+                          onClick={() =>
+                            void restoreFolderFromTrash(f._id)
+                              .then(() => router.refresh())
+                              .catch((e) => toastActionError(e, { id: "dash-restore-folder" }))
+                          }
                         >
                           Restore
                         </button>
@@ -631,7 +823,9 @@ export default function DashboardClient(props: {
                           className="rounded-xl px-3 py-1.5 text-xs font-semibold text-red-600 dark:text-red-400"
                           onClick={() => {
                             if (confirm(`Permanently delete folder “${f.name}”?`)) {
-                              void permanentlyDeleteFolder(f._id).then(() => router.refresh());
+                              void permanentlyDeleteFolder(f._id)
+                                .then(() => router.refresh())
+                                .catch((e) => toastActionError(e, { id: "dash-delete-folder" }));
                             }
                           }}
                         >
@@ -656,7 +850,11 @@ export default function DashboardClient(props: {
                         <button
                           type="button"
                           className="rounded-xl bg-[var(--color-accent)]/15 px-3 py-1.5 text-xs font-semibold text-[var(--color-accent)]"
-                          onClick={() => void restoreSheetFromTrash(s._id).then(() => router.refresh())}
+                          onClick={() =>
+                            void restoreSheetFromTrash(s._id)
+                              .then(() => router.refresh())
+                              .catch((e) => toastActionError(e, { id: "dash-restore-sheet" }))
+                          }
                         >
                           Restore
                         </button>
@@ -665,7 +863,9 @@ export default function DashboardClient(props: {
                           className="rounded-xl px-3 py-1.5 text-xs font-semibold text-red-600 dark:text-red-400"
                           onClick={() => {
                             if (confirm(`Permanently delete “${s.title}”?`)) {
-                              void permanentlyDeleteSheet(s._id).then(() => router.refresh());
+                              void permanentlyDeleteSheet(s._id)
+                                .then(() => router.refresh())
+                                .catch((e) => toastActionError(e, { id: "dash-delete-sheet" }));
                             }
                           }}
                         >
@@ -699,7 +899,7 @@ export default function DashboardClient(props: {
                       setNewOrg("");
                       router.refresh();
                     } catch (e) {
-                      alert(e instanceof Error ? e.message : "Failed");
+                      toastActionError(e, { id: "dash-create-org" });
                     }
                   }}
                 >
@@ -881,6 +1081,8 @@ export default function DashboardClient(props: {
                     await createFolder({ name: folderModalName, personal: true });
                     setFolderModalOpen(false);
                     router.refresh();
+                  } catch (e) {
+                    toastActionError(e, { id: "dash-create-folder" });
                   } finally {
                     setFolderCreating(false);
                   }
