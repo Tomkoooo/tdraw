@@ -2,8 +2,9 @@
 
 import { useEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
-import { Info, MoreHorizontal, Pencil, Pin, PinOff, Share2, Trash2 } from "lucide-react";
-import { moveSheetToTrash, setSheetPinned, updateSheetTitle } from "@/lib/actions/sheet";
+import { FolderOpen, Info, MoreHorizontal, Pencil, Pin, PinOff, Share2, Trash2 } from "lucide-react";
+import { moveSheetToFolder, moveSheetToTrash, setSheetPinned, updateSheetTitle } from "@/lib/actions/sheet";
+import { listFolders } from "@/lib/actions/folder";
 import { toastActionError } from "@/lib/client/actionFeedback";
 import { useRouter } from "next/navigation";
 import SheetShareForm from "@/components/SheetShareForm";
@@ -43,6 +44,10 @@ export default function SheetCardMenu({
   const [shareOpen, setShareOpen] = useState(false);
   const [renameOpen, setRenameOpen] = useState(false);
   const [infoOpen, setInfoOpen] = useState(false);
+  const [moveOpen, setMoveOpen] = useState(false);
+  const [moveBusy, setMoveBusy] = useState(false);
+  const [folderChoices, setFolderChoices] = useState<Array<{ _id: string; name: string }>>([]);
+  const [selectedFolderId, setSelectedFolderId] = useState<string>(sheet.folderId ?? "");
   const [renameVal, setRenameVal] = useState(sheet.title);
   const btnRef = useRef<HTMLButtonElement>(null);
 
@@ -56,6 +61,31 @@ export default function SheetCardMenu({
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
   }, [open]);
+
+  useEffect(() => {
+    if (!moveOpen) return;
+    let alive = true;
+    const loadFolders = async () => {
+      try {
+        const rows = sheet.organizationId
+          ? await listFolders({ organizationId: sheet.organizationId })
+          : await listFolders({ ownerPersonal: true });
+        if (!alive) return;
+        setFolderChoices(rows.map((row) => ({ _id: row._id, name: row.name })));
+      } catch (err) {
+        if (!alive) return;
+        toastActionError(err, { id: "sheet-menu-load-folders" });
+      }
+    };
+    void loadFolders();
+    return () => {
+      alive = false;
+    };
+  }, [moveOpen, sheet.organizationId]);
+
+  useEffect(() => {
+    setSelectedFolderId(sheet.folderId ?? "");
+  }, [sheet.folderId, moveOpen]);
 
   if (!visible) return null;
 
@@ -147,6 +177,17 @@ export default function SheetCardMenu({
               <button
                 type="button"
                 className="flex w-full items-center gap-2 px-4 py-2.5 text-left text-sm font-semibold hover:bg-black/6 dark:hover:bg-white/10"
+                onClick={() => {
+                  setMoveOpen(true);
+                  setOpen(false);
+                }}
+              >
+                <FolderOpen className="h-4 w-4 opacity-70" />
+                Move to...
+              </button>
+              <button
+                type="button"
+                className="flex w-full items-center gap-2 px-4 py-2.5 text-left text-sm font-semibold hover:bg-black/6 dark:hover:bg-white/10"
                 onClick={() => void onPin()}
               >
                 {sheet.pinned ? <PinOff className="h-4 w-4 opacity-70" /> : <Pin className="h-4 w-4 opacity-70" />}
@@ -233,6 +274,66 @@ export default function SheetCardMenu({
                   </button>
                   <button type="submit" className="rounded-xl bg-[var(--color-accent)] px-4 py-2 text-sm font-semibold text-white">
                     Save
+                  </button>
+                </div>
+              </form>
+            </div>,
+            document.body
+          )
+        : null}
+
+      {typeof document !== "undefined" && moveOpen
+        ? createPortal(
+            <div className="fixed inset-0 z-[100] flex items-center justify-center p-4">
+              <button type="button" className="absolute inset-0 bg-black/50 backdrop-blur-sm" onClick={() => setMoveOpen(false)} />
+              <form
+                onSubmit={(e) => {
+                  e.preventDefault();
+                  if (moveBusy) return;
+                  setMoveBusy(true);
+                  void moveSheetToFolder(sheet._id, selectedFolderId || null)
+                    .then(() => {
+                      setMoveOpen(false);
+                      router.refresh();
+                    })
+                    .catch((err) => toastActionError(err, { id: "sheet-menu-move-folder" }))
+                    .finally(() => setMoveBusy(false));
+                }}
+                className="glass-menu relative z-10 w-full max-w-sm rounded-[1.75rem] p-6 shadow-2xl"
+                onClick={(e) => e.stopPropagation()}
+              >
+                <h2 className="mb-3 text-lg font-bold">Move note</h2>
+                <label className="mb-2 block text-xs font-semibold uppercase tracking-wide text-gray-500 dark:text-gray-400">
+                  Destination
+                </label>
+                <select
+                  value={selectedFolderId}
+                  onChange={(e) => setSelectedFolderId(e.target.value)}
+                  className="input-field mb-4 min-h-[48px] w-full rounded-2xl px-4 py-3 text-sm"
+                  disabled={moveBusy}
+                >
+                  <option value="">{sheet.organizationId ? "Org root (no folder)" : "My Drive (no folder)"}</option>
+                  {folderChoices.map((folder) => (
+                    <option key={folder._id} value={folder._id}>
+                      {folder.name}
+                    </option>
+                  ))}
+                </select>
+                <div className="flex justify-end gap-2">
+                  <button
+                    type="button"
+                    className="rounded-xl px-4 py-2 text-sm font-semibold hover:bg-black/5 dark:hover:bg-white/10"
+                    onClick={() => setMoveOpen(false)}
+                    disabled={moveBusy}
+                  >
+                    Cancel
+                  </button>
+                  <button
+                    type="submit"
+                    className="rounded-xl bg-[var(--color-accent)] px-4 py-2 text-sm font-semibold text-white disabled:opacity-50"
+                    disabled={moveBusy}
+                  >
+                    {moveBusy ? "Moving..." : "Move"}
                   </button>
                 </div>
               </form>

@@ -5,6 +5,7 @@ import {
   Building2,
   CalendarDays,
   CheckSquare,
+  Folder,
   History,
   LayoutGrid,
   List,
@@ -22,7 +23,7 @@ import { createFolder } from "@/lib/actions/folder";
 import { createOrganization } from "@/lib/actions/org";
 import { permanentlyDeleteSheet, restoreSheetFromTrash } from "@/lib/actions/sheet";
 import { permanentlyDeleteFolder, restoreFolderFromTrash } from "@/lib/actions/folder";
-import { usePathname, useRouter } from "next/navigation";
+import { usePathname, useRouter, useSearchParams } from "next/navigation";
 import LogoutButton from "@/components/LogoutButton";
 import UserAvatar from "@/components/UserAvatar";
 import ThemeToggle from "@/components/ThemeToggle";
@@ -67,6 +68,27 @@ function pinnedUpdatedAtComparator(a: SheetCard, b: SheetCard) {
   if (pa !== pb) return pb - pa;
   if (pa === 1 && pb === 1) return new Date(b.updatedAt).getTime() - new Date(a.updatedAt).getTime();
   return 0;
+}
+
+function collectFolderDescendants(folderId: string, folders: FolderRow[]) {
+  const byParent = new Map<string, string[]>();
+  for (const folder of folders) {
+    const parent = folder.parentFolderId ?? "__root__";
+    const list = byParent.get(parent) ?? [];
+    list.push(folder._id);
+    byParent.set(parent, list);
+  }
+
+  const visited = new Set<string>();
+  const queue = [folderId];
+  while (queue.length > 0) {
+    const current = queue.shift();
+    if (!current || visited.has(current)) continue;
+    visited.add(current);
+    const children = byParent.get(current) ?? [];
+    for (const child of children) queue.push(child);
+  }
+  return visited;
 }
 
 function EmptyDrive() {
@@ -162,6 +184,7 @@ export default function DashboardClient(props: {
   } = props;
   const router = useRouter();
   const pathname = usePathname() ?? "";
+  const searchParams = useSearchParams();
 
   const [segment, setSegment] = useState<Segment>("drive");
   const [visitLog, setVisitLog] = useState<Record<string, SheetVisitEntry>>({});
@@ -169,6 +192,7 @@ export default function DashboardClient(props: {
   const [q, setQ] = useState("");
   const [view, setView] = useState<"grid" | "list">("grid");
   const [driveSort, setDriveSort] = useState<DriveSort>("updated");
+  const [activeFolderId, setActiveFolderId] = useState<string | null>(null);
   const [newOrg, setNewOrg] = useState("");
   const [orgTab, setOrgTab] = useState<string | null>(orgs[0]?._id ?? null);
   const [moreOpen, setMoreOpen] = useState(false);
@@ -177,18 +201,17 @@ export default function DashboardClient(props: {
   const [folderCreating, setFolderCreating] = useState(false);
 
   useEffect(() => {
-    if (typeof window === "undefined") return;
+    const wantsNewFolder = searchParams.get("newFolder") === "1";
+    if (!wantsNewFolder || typeof window === "undefined") return;
     const u = new URL(window.location.href);
-    if (u.searchParams.get("newFolder") === "1") {
-      u.searchParams.delete("newFolder");
-      const qs = u.searchParams.toString();
-      window.history.replaceState({}, "", `${u.pathname}${qs ? `?${qs}` : ""}${u.hash}`);
-      queueMicrotask(() => {
-        setFolderModalName("");
-        setFolderModalOpen(true);
-      });
-    }
-  }, []);
+    u.searchParams.delete("newFolder");
+    const qs = u.searchParams.toString();
+    window.history.replaceState({}, "", `${u.pathname}${qs ? `?${qs}` : ""}${u.hash}`);
+    queueMicrotask(() => {
+      setFolderModalName("");
+      setFolderModalOpen(true);
+    });
+  }, [searchParams]);
 
   const [mineOrder, setMineOrder] = useState(mine);
   const [folderOrder, setFolderOrder] = useState(personalFolders);
@@ -254,7 +277,21 @@ export default function DashboardClient(props: {
   const sortSheets = useCallback(
     (rows: SheetCard[]) => {
       const t = q.trim().toLowerCase();
-      const base = t ? rows.filter((s) => s.title.toLowerCase().includes(t)) : [...rows];
+      const activeFolderIds = activeFolderId ? collectFolderDescendants(activeFolderId, folderOrder) : null;
+      const baseFiltered = rows.filter((sheet) => {
+        if (!activeFolderIds) return true;
+        if (!sheet.folderId) return false;
+        return activeFolderIds.has(sheet.folderId);
+      });
+      const base = t
+        ? baseFiltered.filter((s) => {
+            const titleMatch = s.title.toLowerCase().includes(t);
+            const folderName =
+              s.folderId ? folderOrder.find((f) => f._id === s.folderId)?.name.toLowerCase() ?? "" : "my drive";
+            const folderMatch = folderName.includes(t);
+            return titleMatch || folderMatch;
+          })
+        : [...baseFiltered];
       base.sort((a, b) => {
         const pinnedCmp = pinnedUpdatedAtComparator(a, b);
         if (pinnedCmp !== 0) return pinnedCmp;
@@ -267,7 +304,7 @@ export default function DashboardClient(props: {
       });
       return base;
     },
-    [q, driveSort]
+    [q, driveSort, activeFolderId, folderOrder]
   );
 
   const sortFolders = useCallback(
@@ -290,6 +327,18 @@ export default function DashboardClient(props: {
 
   const filteredMine = useMemo(() => sortSheets(mineOrder), [mineOrder, sortSheets]);
   const filteredFolders = useMemo(() => sortFolders(folderOrder), [folderOrder, sortFolders]);
+  const folderItemCount = useMemo(() => {
+    const counts: Record<string, number> = {};
+    for (const sheet of mineOrder) {
+      if (!sheet.folderId) continue;
+      counts[sheet.folderId] = (counts[sheet.folderId] ?? 0) + 1;
+    }
+    return counts;
+  }, [mineOrder]);
+  const activeFolderName = useMemo(
+    () => folderOrder.find((folder) => folder._id === activeFolderId)?.name ?? "All notes",
+    [activeFolderId, folderOrder],
+  );
 
   const filteredSharedWith = useMemo(() => {
     const t = q.trim().toLowerCase();
@@ -635,8 +684,33 @@ export default function DashboardClient(props: {
               </span>
             </div>
 
-            <SortablePersonalFolders folders={filteredFolders} onOrderChange={setFolderOrder} />
+            <div className="glass-panel flex flex-wrap items-center gap-2 rounded-2xl px-3 py-2">
+              <button
+                type="button"
+                onClick={() => setActiveFolderId(null)}
+                className={`inline-flex min-h-[36px] items-center gap-1.5 rounded-full px-3 text-xs font-semibold ${
+                  activeFolderId === null
+                    ? "bg-[var(--color-accent)] text-white"
+                    : "bg-black/5 text-gray-700 hover:bg-black/10 dark:bg-white/10 dark:text-gray-200 dark:hover:bg-white/15"
+                }`}
+              >
+                <Folder className="h-3.5 w-3.5" />
+                All notes
+                <span className="rounded-full bg-black/10 px-1.5 py-0.5 text-[10px] dark:bg-white/15">{mineOrder.length}</span>
+              </button>
+              <SortablePersonalFolders
+                folders={filteredFolders}
+                onOrderChange={setFolderOrder}
+                activeFolderId={activeFolderId}
+                folderItemCount={folderItemCount}
+                onSelectFolder={setActiveFolderId}
+              />
+            </div>
 
+            <p className="text-xs text-gray-500 dark:text-gray-400">
+              {activeFolderId ? `Showing "${activeFolderName}" and subfolders` : "Showing all notes across My Drive"}
+              {q.trim() ? ` · Search: "${q.trim()}"` : ""}
+            </p>
             {filteredMine.length === 0 && !q.trim() ? (
               <EmptyDrive />
             ) : filteredMine.length === 0 ? (

@@ -142,7 +142,17 @@ function SortableSheetCard({
   );
 }
 
-function SortableFolderChip({ folder }: { folder: FolderRow }) {
+function SortableFolderChip({
+  folder,
+  active,
+  itemCount,
+  onSelect,
+}: {
+  folder: FolderRow;
+  active: boolean;
+  itemCount: number;
+  onSelect?: (folderId: string) => void;
+}) {
   const router = useRouter();
   const { attributes, listeners, setNodeRef, transform, transition, isDragging } = useSortable({ id: folder._id });
   const style = { transform: CSS.Transform.toString(transform), transition, opacity: isDragging ? 0.55 : 1 };
@@ -162,7 +172,9 @@ function SortableFolderChip({ folder }: { folder: FolderRow }) {
     <div
       ref={setNodeRef}
       style={style}
-      className="glass inline-flex shrink-0 items-center gap-1.5 rounded-full py-1.5 pl-2 pr-3 text-xs font-semibold animate-micro"
+      className={`glass inline-flex shrink-0 items-center gap-1.5 rounded-full py-1.5 pl-2 pr-3 text-xs font-semibold animate-micro ${
+        active ? "ring-2 ring-[var(--color-accent)]/45 bg-[var(--color-accent)]/10" : ""
+      }`}
     >
       <button
         type="button"
@@ -173,8 +185,16 @@ function SortableFolderChip({ folder }: { folder: FolderRow }) {
       >
         <GripVertical className="h-3.5 w-3.5" />
       </button>
-      <FolderIcon className="h-3.5 w-3.5 opacity-70" />
-      <span>{folder.name}</span>
+      <button
+        type="button"
+        onClick={() => onSelect?.(folder._id)}
+        className="inline-flex items-center gap-1 rounded-full px-1 py-0.5 hover:bg-black/5 dark:hover:bg-white/10"
+        aria-label={`Open folder ${folder.name}`}
+      >
+        <FolderIcon className="h-3.5 w-3.5 opacity-70" />
+        <span>{folder.name}</span>
+        <span className="rounded-full bg-black/8 px-1.5 py-0.5 text-[10px] dark:bg-white/10">{itemCount}</span>
+      </button>
       <button
         type="button"
         onClick={(e) => void togglePin(e)}
@@ -190,9 +210,15 @@ function SortableFolderChip({ folder }: { folder: FolderRow }) {
 export function SortablePersonalFolders({
   folders,
   onOrderChange,
+  activeFolderId,
+  folderItemCount,
+  onSelectFolder,
 }: {
   folders: FolderRow[];
   onOrderChange: (next: FolderRow[]) => void;
+  activeFolderId?: string | null;
+  folderItemCount?: Record<string, number>;
+  onSelectFolder?: (folderId: string) => void;
 }) {
   const router = useRouter();
   const sensors = useSensors(
@@ -229,7 +255,17 @@ export function SortablePersonalFolders({
       onDragEnd={(ev) => void onDragEnd(ev)}
     >
       <SortableContext items={ids} strategy={horizontalListSortingStrategy}>
-        <div className="flex flex-wrap gap-2">{folders.map((f) => <SortableFolderChip key={f._id} folder={f} />)}</div>
+        <div className="flex flex-wrap gap-2">
+          {folders.map((f) => (
+            <SortableFolderChip
+              key={f._id}
+              folder={f}
+              active={activeFolderId === f._id}
+              itemCount={folderItemCount?.[f._id] ?? 0}
+              onSelect={onSelectFolder}
+            />
+          ))}
+        </div>
       </SortableContext>
     </DndContext>
   );
