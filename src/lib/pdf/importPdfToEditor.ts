@@ -1,5 +1,50 @@
-import type { Editor } from "tldraw";
-import { PageRecordType, createShapesForAssets } from "tldraw";
+type BinaryFileData = {
+  id: string;
+  dataURL: string;
+  mimeType: string;
+  created: number;
+  lastRetrieved?: number;
+};
+
+type ExcalidrawImageElement = {
+  type: "image";
+  id: string;
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+  fileId: string;
+  status: "saved";
+  seed: number;
+  version: number;
+  versionNonce: number;
+  isDeleted: boolean;
+  boundElements: null;
+  updated: number;
+  link: null;
+  locked: boolean;
+  opacity: number;
+  groupIds: string[];
+  frameId: null;
+  roundness: null;
+  angle: number;
+  strokeColor: string;
+  backgroundColor: string;
+  fillStyle: "solid";
+  strokeWidth: number;
+  strokeStyle: "solid";
+  roughness: number;
+  isStrokeDisabled: boolean;
+  isBackgroundDisabled: boolean;
+  isCropLocked: boolean;
+  crop: null;
+};
+
+type ExcalidrawForImport = {
+  getSceneElements: () => ReadonlyArray<{ x: number; y: number; width: number; height: number }>;
+  addFiles: (files: BinaryFileData[]) => void;
+  updateScene: (scene: { elements: ReadonlyArray<{ [key: string]: unknown }> }) => void;
+};
 
 let workerConfigured = false;
 
@@ -11,22 +56,24 @@ function ensurePdfWorker(pdfjs: typeof import("pdfjs-dist/legacy/build/pdf.mjs")
 
 const MAX_PAGE_PX = 2400;
 
-/**
- * Adds one tldraw page per PDF page with the page rasterized as a background image.
- * Uses the built-in page menu for rename / reorder / delete after import.
- *
- * Uses the pdf.js **legacy** bundle so `Uint8Array.prototype.toHex` and related
- * Stage-4 helpers are polyfilled (the default build assumes a very new runtime).
- */
-export async function importPdfToEditor(editor: Editor, file: File) {
+export async function importPdfToEditor(excalidrawAPI: ExcalidrawForImport, file: File) {
   const pdfjs = await import("pdfjs-dist/legacy/build/pdf.mjs");
   ensurePdfWorker(pdfjs);
 
   const buf = new Uint8Array(await file.arrayBuffer());
   const pdf = await pdfjs.getDocument({ data: buf }).promise;
-  const baseName = file.name.replace(/\.pdf$/i, "") || "PDF";
 
-  const viewportCenter = editor.getViewportPageBounds().center;
+  const currentElements = excalidrawAPI.getSceneElements();
+  const nextElements = [...currentElements];
+  const nextFiles: BinaryFileData[] = [];
+  
+  let currentY = 0;
+  if (currentElements.length > 0) {
+    const bottomElement = currentElements.reduce((prev, curr) => 
+      ((curr.y + curr.height) > (prev.y + prev.height) ? curr : prev)
+    , currentElements[0]);
+    currentY = bottomElement.y + bottomElement.height + 50;
+  }
 
   for (let i = 0; i < pdf.numPages; i++) {
     const page = await pdf.getPage(i + 1);
@@ -40,20 +87,57 @@ export async function importPdfToEditor(editor: Editor, file: File) {
 
     await page.render({ canvasContext: canvas.getContext("2d")!, viewport, canvas }).promise;
 
-    const blob: Blob | null = await new Promise((resolve) =>
-      canvas.toBlob((b) => resolve(b), "image/png")
-    );
-    if (!blob) continue;
+    const dataURL = canvas.toDataURL("image/png");
+    const fileId = "file-pdf-" + Date.now() + "-" + i;
 
-    const imageFile = new File([blob], `${baseName}-p${i + 1}.png`, { type: "image/png" });
-    const asset = await editor.getAssetForExternalContent({ type: "file", file: imageFile });
-    if (!asset) continue;
+    nextFiles.push({
+      id: fileId,
+      dataURL,
+      mimeType: "image/png",
+      created: Date.now(),
+      lastRetrieved: Date.now()
+    });
 
-    const pageId = PageRecordType.createId();
-    editor.createPage({ id: pageId, name: `${baseName} ${i + 1}` });
-    editor.setCurrentPage(pageId);
-    await createShapesForAssets(editor, [asset], viewportCenter);
+    const imageElement: ExcalidrawImageElement = {
+      type: "image",
+      id: "img-" + Date.now() + "-" + i,
+      x: 0,
+      y: currentY,
+      width: Math.floor(viewport.width),
+      height: Math.floor(viewport.height),
+      fileId,
+      status: "saved",
+      seed: Math.floor(Math.random() * 2 ** 31),
+      version: 1,
+      versionNonce: Math.floor(Math.random() * 2 ** 31),
+      isDeleted: false,
+      boundElements: null,
+      updated: Date.now(),
+      link: null,
+      locked: false,
+      opacity: 100,
+      groupIds: [],
+      frameId: null,
+      roundness: null,
+      angle: 0,
+      strokeColor: "transparent",
+      backgroundColor: "transparent",
+      fillStyle: "solid",
+      strokeWidth: 1,
+      strokeStyle: "solid",
+      roughness: 1,
+      isStrokeDisabled: true,
+      isBackgroundDisabled: false,
+      isCropLocked: false,
+      crop: null,
+    };
+    nextElements.push(imageElement);
+
+    currentY += Math.floor(viewport.height) + 50;
   }
 
   pdf.destroy();
+
+  excalidrawAPI.addFiles(nextFiles);
+  excalidrawAPI.updateScene({ elements: nextElements });
 }

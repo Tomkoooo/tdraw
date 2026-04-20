@@ -1,7 +1,7 @@
 import { getSheet } from "@/lib/actions/sheet";
 import { getHotbarToolIds } from "@/lib/actions/settings";
 import { redirect } from "next/navigation";
-import TldrawEditor from "@/components/TldrawEditor";
+import ExcalidrawEditor from "@/components/ExcalidrawEditor";
 import { auth } from "@/auth";
 
 export default async function SheetPage({ params }: { params: Promise<{ id: string }> }) {
@@ -14,7 +14,7 @@ export default async function SheetPage({ params }: { params: Promise<{ id: stri
   }
 
   return (
-    <TldrawEditor
+    <ExcalidrawEditor
       key={sheet._id}
       sheetId={sheet._id}
       initialData={sheet.canvasState}

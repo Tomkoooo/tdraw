@@ -7,5 +7,7 @@ import { NextResponse } from "next/server";
 export async function GET() {
   const url =
     process.env.NEXT_PUBLIC_REALTIME_URL || process.env.REALTIME_PUBLIC_URL || "";
+    
+  console.debug(`> [API] /api/realtime-config called. Returning URL: "${url}"`);
   return NextResponse.json({ url });
 }

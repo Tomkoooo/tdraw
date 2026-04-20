@@ -74,7 +74,7 @@ export default function HotbarSettingsForm({
   const router = useRouter();
   const baseOrder = useMemo(
     () => (initialSelected.length ? initialSelected.filter((id) => allIds.includes(id)) : [...allIds]),
-    [allIds, initialSelected]
+    [allIds, initialSelected],
   );
   const [ordered, setOrdered] = useState<string[]>(() => baseOrder);
   const [saving, setSaving] = useState(false);
@@ -84,7 +84,7 @@ export default function HotbarSettingsForm({
 
   const sensors = useSensors(
     useSensor(PointerSensor, { activationConstraint: { distance: 6 } }),
-    useSensor(KeyboardSensor, { coordinateGetter: sortableKeyboardCoordinates })
+    useSensor(KeyboardSensor, { coordinateGetter: sortableKeyboardCoordinates }),
   );
 
   const onDragEnd = (e: DragEndEvent) => {
@@ -109,7 +109,7 @@ export default function HotbarSettingsForm({
       <div>
         <h2 className="text-lg font-bold tracking-tight">Toolbar order</h2>
         <p className="mt-1 text-sm text-gray-500 dark:text-gray-400">
-          Drag to reorder. These tools appear in your bottom tldraw bar. Empty selection restores defaults.
+          Drag to reorder. These preferences are kept for your account. Empty selection restores defaults.
         </p>
         <DndContext id="tdraw-settings-hotbar" sensors={sensors} collisionDetection={closestCenter} onDragEnd={onDragEnd}>
           <SortableContext items={ordered} strategy={verticalListSortingStrategy}>

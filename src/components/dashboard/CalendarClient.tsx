@@ -148,8 +148,8 @@ export default function CalendarClient({
   const miniLabel = miniMonth.toLocaleString(undefined, { month: "long", year: "numeric" });
 
   return (
-    <div className="mt-6 flex flex-col gap-4 lg:flex-row lg:items-start">
-      <aside className="glass-panel w-full shrink-0 rounded-[1.5rem] p-4 lg:w-72">
+    <div className="flex flex-col gap-4 lg:flex-row lg:items-start">
+      <aside className="glass-thick w-full shrink-0 rounded-[1.5rem] p-4 lg:w-80">
         <div className="mb-4 flex items-center justify-between">
           <button
             type="button"
@@ -212,7 +212,7 @@ export default function CalendarClient({
               key={v}
               type="button"
               onClick={() => setFcView(v)}
-              className={`rounded-full px-4 py-2 text-sm font-semibold ${
+              className={`min-h-[44px] rounded-full px-4 py-2 text-sm font-semibold ${
                 fcView === v ? "bg-[var(--color-accent)] text-white" : "glass-panel"
               }`}
             >
@@ -220,7 +220,7 @@ export default function CalendarClient({
             </button>
           ))}
         </div>
-        <div className="glass-panel overflow-hidden rounded-[1.5rem] p-2 md:p-4">
+        <div className="glass-thick overflow-hidden rounded-[1.5rem] p-2 md:p-4">
           <FullCalendar
             key={fcView}
             plugins={[dayGridPlugin, timeGridPlugin, interactionPlugin]}
@@ -240,10 +240,7 @@ export default function CalendarClient({
       {compose ? (
         <div className="fixed inset-0 z-[100] flex items-end justify-center p-4 sm:items-center">
           <button type="button" className="absolute inset-0 bg-black/50 backdrop-blur-sm" onClick={() => setCompose(null)} />
-          <form
-            onSubmit={(e) => void submitCreate(e)}
-            className="glass-menu relative max-h-[90vh] w-full max-w-lg overflow-y-auto rounded-[1.75rem] p-6 shadow-2xl"
-          >
+          <form onSubmit={(e) => void submitCreate(e)} className="glass-menu relative max-h-[90vh] w-full max-w-lg overflow-y-auto rounded-[1.75rem] p-6 shadow-2xl">
             <h2 className="mb-3 text-lg font-bold">New event</h2>
             <div className="mb-3 flex gap-1 rounded-[1rem] bg-black/[0.05] p-1 dark:bg-white/[0.06]">
               <button
@@ -270,7 +267,7 @@ export default function CalendarClient({
               <select
                 value={compose.orgId ?? orgs[0]?._id ?? ""}
                 onChange={(e) => setCompose((c) => (c ? { ...c, orgId: e.target.value } : c))}
-                className="mb-3 w-full rounded-2xl border border-[var(--input-border)] bg-[var(--input-bg)] px-3 py-2 text-sm"
+                className="input-field mb-3 w-full rounded-2xl px-3 py-2 text-sm"
               >
                 {orgs.map((o) => (
                   <option key={o._id} value={o._id}>
@@ -287,26 +284,26 @@ export default function CalendarClient({
               onChange={(e) => setTitle(e.target.value)}
               placeholder="Title"
               required
-              className="mb-2 w-full rounded-2xl border border-[var(--input-border)] bg-[var(--input-bg)] px-4 py-3 text-sm"
+              className="input-field mb-2 w-full rounded-2xl px-4 py-3 text-sm"
             />
             <input
               value={location}
               onChange={(e) => setLocation(e.target.value)}
               placeholder="Location (optional)"
-              className="mb-2 w-full rounded-2xl border border-[var(--input-border)] bg-[var(--input-bg)] px-4 py-3 text-sm"
+              className="input-field mb-2 w-full rounded-2xl px-4 py-3 text-sm"
             />
             <textarea
               value={description}
               onChange={(e) => setDescription(e.target.value)}
               placeholder="Description"
               rows={3}
-              className="mb-2 w-full rounded-2xl border border-[var(--input-border)] bg-[var(--input-bg)] px-4 py-3 text-sm"
+              className="input-field mb-2 w-full rounded-2xl px-4 py-3 text-sm"
             />
             <label className="mb-2 block text-xs font-bold uppercase text-gray-500">Reminder</label>
             <select
               value={reminder}
               onChange={(e) => setReminder(Number(e.target.value))}
-              className="mb-3 w-full rounded-2xl border border-[var(--input-border)] bg-[var(--input-bg)] px-3 py-2 text-sm"
+              className="input-field mb-3 w-full rounded-2xl px-3 py-2 text-sm"
             >
               {REMINDERS.map((r) => (
                 <option key={r.m} value={r.m}>
@@ -319,7 +316,7 @@ export default function CalendarClient({
               value={guestEmails}
               onChange={(e) => setGuestEmails(e.target.value)}
               rows={2}
-              className="mb-3 w-full rounded-2xl border border-[var(--input-border)] bg-[var(--input-bg)] px-3 py-2 text-sm"
+              className="input-field mb-3 w-full rounded-2xl px-3 py-2 text-sm"
             />
             {compose.scope === "org" && compose.orgId ? (
               <div className="mb-3 max-h-36 space-y-1 overflow-y-auto rounded-xl border border-[var(--input-border)] p-2">

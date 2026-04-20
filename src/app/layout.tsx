@@ -7,6 +7,7 @@ import AppToaster from "@/components/AppToaster";
 import GlobalAppChrome from "@/components/GlobalAppChrome";
 import ServiceWorkerRegister from "@/components/ServiceWorkerRegister";
 import { getSiteUrl } from "@/lib/siteUrl";
+import "@excalidraw/excalidraw/index.css";
 
 const siteName = "tDraw";
 const siteDescription =

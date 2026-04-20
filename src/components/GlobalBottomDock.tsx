@@ -3,7 +3,7 @@
 import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
 import { useEffect, useState } from "react";
-import { CalendarDays, Calculator, CheckSquare, Loader2, Plus } from "lucide-react";
+import { CalendarDays, Calculator, CheckSquare, Home, Loader2, Plus } from "lucide-react";
 import { createSheet } from "@/lib/actions/sheet";
 import { toastActionError } from "@/lib/client/actionFeedback";
 import { useCalculator } from "@/context/CalculatorContext";
@@ -22,26 +22,52 @@ export default function GlobalBottomDock() {
   }, [pathname]);
 
   return (
-    <div className="pointer-events-none fixed bottom-0 left-0 right-0 z-[60] flex justify-center pb-[max(0.75rem,env(safe-area-inset-bottom))]">
-      <div className="pointer-events-auto flex w-full max-w-lg items-end justify-between gap-2 px-3 sm:gap-3 sm:px-4">
-        <Link
-          href="/dashboard/tasks"
-          className="glass-thick mb-2 flex h-14 w-14 shrink-0 touch-manipulation items-center justify-center rounded-2xl shadow-lg animate-micro hover:lift-sm active:opacity-90"
-          aria-label="Tasks"
-        >
-          <CheckSquare className="h-6 w-6 text-[var(--color-accent)]" />
-        </Link>
-
-        <button
-          type="button"
-          onClick={() => openCalculator(true)}
-          className="glass-thick mb-2 flex h-14 w-14 shrink-0 touch-manipulation items-center justify-center rounded-2xl shadow-lg animate-micro hover:lift-sm active:opacity-90"
-          aria-label="Open calculator"
-        >
-          <Calculator className="h-6 w-6 text-[var(--color-accent)]" />
-        </button>
-
-        <div className="relative mb-1 shrink-0">
+    <div className="pointer-events-none fixed bottom-0 left-0 right-0 z-[60] flex justify-center pb-[max(0.9rem,env(safe-area-inset-bottom))]">
+      <div className="pointer-events-auto relative w-full max-w-3xl px-3 sm:px-4">
+        <div className="glass-thick flex min-h-[78px] items-end justify-between rounded-[28px] px-3 pb-2 pt-2 shadow-2xl">
+          <Link
+            href="/dashboard"
+            className={`flex min-h-[56px] min-w-[56px] touch-manipulation items-center justify-center rounded-2xl transition ${
+              pathname === "/dashboard"
+                ? "bg-[var(--color-accent)] text-white"
+                : "text-[var(--color-text)] hover:bg-black/5 dark:hover:bg-white/10"
+            }`}
+            aria-label="Dashboard"
+          >
+            <Home className="h-5 w-5" />
+          </Link>
+          <Link
+            href="/dashboard/tasks"
+            className={`flex min-h-[56px] min-w-[56px] touch-manipulation items-center justify-center rounded-2xl transition ${
+              pathname.startsWith("/dashboard/tasks")
+                ? "bg-[var(--color-accent)] text-white"
+                : "text-[var(--color-text)] hover:bg-black/5 dark:hover:bg-white/10"
+            }`}
+            aria-label="Tasks"
+          >
+            <CheckSquare className="h-5 w-5" />
+          </Link>
+          <button
+            type="button"
+            onClick={() => openCalculator(true)}
+            className="flex min-h-[56px] min-w-[56px] touch-manipulation items-center justify-center rounded-2xl text-[var(--color-text)] transition hover:bg-black/5 dark:hover:bg-white/10"
+            aria-label="Open calculator"
+          >
+            <Calculator className="h-5 w-5" />
+          </button>
+          <Link
+            href="/dashboard/calendar"
+            className={`flex min-h-[56px] min-w-[56px] touch-manipulation items-center justify-center rounded-2xl transition ${
+              pathname.startsWith("/dashboard/calendar")
+                ? "bg-[var(--color-accent)] text-white"
+                : "text-[var(--color-text)] hover:bg-black/5 dark:hover:bg-white/10"
+            }`}
+            aria-label="Calendar"
+          >
+            <CalendarDays className="h-5 w-5" />
+          </Link>
+        </div>
+        <div className="relative pointer-events-auto -mt-[74px] flex justify-center">
           {fabOpen ? (
             <>
               <button
@@ -50,11 +76,11 @@ export default function GlobalBottomDock() {
                 aria-label="Close"
                 onClick={() => setFabOpen(false)}
               />
-              <div className="glass-menu absolute bottom-full left-1/2 z-[110] mb-3 w-64 -translate-x-1/2 overflow-hidden rounded-2xl py-2 shadow-2xl">
+              <div className="glass-menu absolute bottom-full left-1/2 z-[110] mb-3 w-72 -translate-x-1/2 overflow-hidden rounded-[22px] py-2 shadow-2xl">
                 <button
                   type="button"
                   disabled={fabBusy}
-                  className="flex w-full items-center gap-3 px-4 py-3 text-left text-sm font-semibold hover:bg-black/5 dark:hover:bg-white/10 disabled:opacity-50"
+                  className="flex min-h-[52px] w-full items-center gap-3 px-4 py-3 text-left text-sm font-semibold hover:bg-black/5 dark:hover:bg-white/10 disabled:opacity-50"
                   onClick={async () => {
                     setFabBusy(true);
                     try {
@@ -74,7 +100,7 @@ export default function GlobalBottomDock() {
                 {isDashboardRoot ? (
                   <button
                     type="button"
-                    className="flex w-full items-center gap-3 px-4 py-3 text-left text-sm font-semibold hover:bg-black/5 dark:hover:bg-white/10"
+                    className="flex min-h-[52px] w-full items-center gap-3 px-4 py-3 text-left text-sm font-semibold hover:bg-black/5 dark:hover:bg-white/10"
                     onClick={() => {
                       setFabOpen(false);
                       router.push("/dashboard?newFolder=1");
@@ -89,20 +115,12 @@ export default function GlobalBottomDock() {
           <button
             type="button"
             onClick={() => setFabOpen((v) => !v)}
-            className="flex h-16 w-16 touch-manipulation items-center justify-center rounded-full bg-[var(--color-accent)] text-white shadow-xl shadow-[var(--color-accent)]/35 animate-micro active:opacity-90 [@media(hover:hover)]:hover:brightness-110"
+            className="flex h-[68px] w-[68px] touch-manipulation items-center justify-center rounded-full bg-[var(--color-accent)] text-white shadow-xl shadow-[var(--color-accent)]/35 animate-micro active:opacity-90 [@media(hover:hover)]:hover:brightness-110"
             aria-label="Create note"
           >
             <Plus className="h-8 w-8" strokeWidth={2.5} />
           </button>
         </div>
-
-        <Link
-          href="/dashboard/calendar"
-          className="glass-thick mb-2 flex h-14 w-14 shrink-0 touch-manipulation items-center justify-center rounded-2xl shadow-lg animate-micro hover:lift-sm active:opacity-90"
-          aria-label="Calendar"
-        >
-          <CalendarDays className="h-6 w-6 text-[var(--color-accent)]" />
-        </Link>
       </div>
     </div>
   );

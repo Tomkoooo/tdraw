@@ -71,7 +71,10 @@ function SortableSheetCard({
             )}
           </div>
           <div className="min-w-0 flex-1">
-            <h3 className="truncate font-semibold">{sheet.title}</h3>
+            <h3 className="truncate font-semibold">
+              {sheet.pinned ? <Pin className="mr-1 inline h-3.5 w-3.5 text-[var(--color-accent)]" aria-hidden /> : null}
+              {sheet.title}
+            </h3>
             <p className="text-xs text-gray-500 dark:text-gray-400">
               {new Date(sheet.updatedAt).toLocaleDateString()}
             </p>
@@ -127,7 +130,10 @@ function SortableSheetCard({
             <Pencil className="h-9 w-9 text-gray-300 dark:text-gray-600" />
           )}
         </div>
-        <h3 className="truncate text-sm font-semibold">{sheet.title}</h3>
+        <h3 className="truncate text-sm font-semibold">
+          {sheet.pinned ? <Pin className="mr-1 inline h-3.5 w-3.5 text-[var(--color-accent)]" aria-hidden /> : null}
+          {sheet.title}
+        </h3>
         <p className="text-[10px] uppercase tracking-wider text-gray-500 dark:text-gray-400">
           {new Date(sheet.updatedAt).toLocaleDateString()}
         </p>

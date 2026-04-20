@@ -9,6 +9,7 @@ import {
   LayoutGrid,
   List,
   MoreHorizontal,
+  Pin,
   Pencil,
   Search,
   Share2,
@@ -58,6 +59,14 @@ type DriveSort = "alpha" | "created" | "updated";
 function fmtStorage(used: number, quota: number) {
   const gb = (n: number) => (n / (1024 * 1024 * 1024)).toFixed(2);
   return `${gb(used)} / ${gb(quota)} GB`;
+}
+
+function pinnedUpdatedAtComparator(a: SheetCard, b: SheetCard) {
+  const pa = a.pinned ? 1 : 0;
+  const pb = b.pinned ? 1 : 0;
+  if (pa !== pb) return pb - pa;
+  if (pa === 1 && pb === 1) return new Date(b.updatedAt).getTime() - new Date(a.updatedAt).getTime();
+  return 0;
 }
 
 function EmptyDrive() {
@@ -247,6 +256,8 @@ export default function DashboardClient(props: {
       const t = q.trim().toLowerCase();
       const base = t ? rows.filter((s) => s.title.toLowerCase().includes(t)) : [...rows];
       base.sort((a, b) => {
+        const pinnedCmp = pinnedUpdatedAtComparator(a, b);
+        if (pinnedCmp !== 0) return pinnedCmp;
         const fa = a.folderId ? 1 : 0;
         const fb = b.folderId ? 1 : 0;
         if (fa !== fb) return fa - fb;
@@ -282,21 +293,36 @@ export default function DashboardClient(props: {
 
   const filteredSharedWith = useMemo(() => {
     const t = q.trim().toLowerCase();
-    if (!t) return shared;
-    return shared.filter((s) => s.title.toLowerCase().includes(t));
+    const base = t ? shared.filter((s) => s.title.toLowerCase().includes(t)) : [...shared];
+    base.sort((a, b) => {
+      const pinnedCmp = pinnedUpdatedAtComparator(a, b);
+      if (pinnedCmp !== 0) return pinnedCmp;
+      return new Date(b.updatedAt).getTime() - new Date(a.updatedAt).getTime();
+    });
+    return base;
   }, [shared, q]);
 
   const filteredSharedBy = useMemo(() => {
     const t = q.trim().toLowerCase();
-    if (!t) return sharedByMe;
-    return sharedByMe.filter((s) => s.title.toLowerCase().includes(t));
+    const base = t ? sharedByMe.filter((s) => s.title.toLowerCase().includes(t)) : [...sharedByMe];
+    base.sort((a, b) => {
+      const pinnedCmp = pinnedUpdatedAtComparator(a, b);
+      if (pinnedCmp !== 0) return pinnedCmp;
+      return new Date(b.updatedAt).getTime() - new Date(a.updatedAt).getTime();
+    });
+    return base;
   }, [sharedByMe, q]);
 
   const filteredOrgSheets = useMemo(() => {
-    const orgSheets = orgTab ? (orgSheetOrder[orgTab] ?? orgSheetsByOrg[orgTab] ?? []) : [];
+    const orgSheets = orgTab ? [...(orgSheetOrder[orgTab] ?? orgSheetsByOrg[orgTab] ?? [])] : [];
     const t = q.trim().toLowerCase();
-    if (!t) return orgSheets;
-    return orgSheets.filter((s) => s.title.toLowerCase().includes(t));
+    const base = t ? orgSheets.filter((s) => s.title.toLowerCase().includes(t)) : orgSheets;
+    base.sort((a, b) => {
+      const pinnedCmp = pinnedUpdatedAtComparator(a, b);
+      if (pinnedCmp !== 0) return pinnedCmp;
+      return new Date(b.updatedAt).getTime() - new Date(a.updatedAt).getTime();
+    });
+    return base;
   }, [orgTab, orgSheetOrder, orgSheetsByOrg, q]);
 
   const unifiedRecentRows = useMemo(() => {
@@ -326,6 +352,8 @@ export default function DashboardClient(props: {
     const t = q.trim().toLowerCase();
     const base = t ? unifiedRecentRows.filter((s) => s.title.toLowerCase().includes(t)) : [...unifiedRecentRows];
     base.sort((a, b) => {
+      const pinnedCmp = pinnedUpdatedAtComparator(a, b);
+      if (pinnedCmp !== 0) return pinnedCmp;
       const primary = recentActivityMs(b, visitLog) - recentActivityMs(a, visitLog);
       if (primary !== 0) return primary;
       const ca = visitLog[a._id]?.count ?? 0;
@@ -358,7 +386,7 @@ export default function DashboardClient(props: {
         onDocActivity={setOrgDocBySheet}
       />
       <header className="sticky top-0 z-40 pt-safe-top">
-        <div className="glass-thick mx-3 mt-3 rounded-[1.75rem] px-4 py-3 shadow-[var(--shadow-float)] md:mx-6 md:rounded-[2rem] md:px-6 md:py-4">
+        <div className="glass-thick mx-3 mt-3 rounded-[1.75rem] px-4 py-3 shadow-[var(--shadow-float)] md:mx-6 md:rounded-[2rem] md:px-6 md:py-5">
           <div className="flex flex-wrap items-center gap-3">
             <UserAvatar
               image={userImage}
@@ -371,6 +399,7 @@ export default function DashboardClient(props: {
                 {segmentLabel}
               </p>
               <h1 className="truncate text-xl font-bold tracking-tight md:text-2xl">Hello, {userFirstName}</h1>
+              <p className="mt-0.5 text-xs text-gray-500 dark:text-gray-400">Everything is organized for touch and pencil flow.</p>
             </div>
             <ThemeToggle />
             <div className="relative">
@@ -440,7 +469,7 @@ export default function DashboardClient(props: {
                 key={id}
                 type="button"
                 onClick={() => setSegment(id)}
-                className={`min-h-[44px] flex-1 rounded-[1.1rem] px-1 text-xs font-semibold transition-all duration-200 sm:text-sm ${
+                className={`min-h-[48px] flex-1 rounded-[1.1rem] px-1 text-xs font-semibold transition-all duration-200 sm:text-sm ${
                   segment === id
                     ? "glass-panel text-[var(--color-text)] shadow-sm"
                     : "text-gray-500 hover:text-gray-800 dark:text-gray-400 dark:hover:text-gray-200"
@@ -458,14 +487,14 @@ export default function DashboardClient(props: {
                 value={q}
                 onChange={(e) => setQ(e.target.value)}
                 placeholder={`Search ${segmentLabel.toLowerCase()}…`}
-                className="w-full rounded-2xl border border-[var(--input-border)] bg-[var(--input-bg)] py-3 pl-10 pr-3 text-sm"
+                className="input-field min-h-[48px] w-full rounded-2xl py-3 pl-10 pr-3 text-sm"
               />
             </div>
             {segment === "drive" ? (
               <select
                 value={driveSort}
                 onChange={(e) => setDriveSort(e.target.value as DriveSort)}
-                className="min-h-[44px] rounded-2xl border border-[var(--input-border)] bg-[var(--input-bg)] px-3 text-sm font-semibold"
+                className="input-field min-h-[48px] rounded-2xl px-3 text-sm font-semibold"
                 aria-label="Sort"
               >
                 <option value="alpha">A–Z</option>
@@ -473,7 +502,7 @@ export default function DashboardClient(props: {
                 <option value="updated">Last updated</option>
               </select>
             ) : null}
-            <div className="flex rounded-2xl border border-[var(--input-border)] bg-[var(--input-bg)] p-1">
+            <div className="input-field flex rounded-2xl p-1">
               <button
                 type="button"
                 aria-label="Grid view"
@@ -495,7 +524,7 @@ export default function DashboardClient(props: {
         </div>
       </header>
 
-      <main className="flex-1 px-3 py-6 md:px-6">
+      <main className="flex-1 px-3 py-6 pb-28 md:px-6">
         {segment === "recent" ? (
           <div className="mx-auto max-w-6xl space-y-3">
             <p className="text-center text-xs text-gray-500 dark:text-gray-400">
@@ -557,7 +586,10 @@ export default function DashboardClient(props: {
                             <FallbackIcon className="h-9 w-9 text-gray-300 dark:text-gray-600" />
                           )}
                         </div>
-                        <h3 className="truncate text-sm font-semibold">{sheet.title}</h3>
+                        <h3 className="truncate text-sm font-semibold">
+                          {sheet.pinned ? <Pin className="mr-1 inline h-3.5 w-3.5 text-[var(--color-accent)]" aria-hidden /> : null}
+                          {sheet.title}
+                        </h3>
                         <p className="truncate text-[11px] font-medium text-gray-500 dark:text-gray-400">{badge}</p>
                       </Link>
                     </div>
@@ -574,7 +606,10 @@ export default function DashboardClient(props: {
                           )}
                         </div>
                         <div className="min-w-0 flex-1">
-                          <h3 className="truncate font-semibold">{sheet.title}</h3>
+                          <h3 className="truncate font-semibold">
+                            {sheet.pinned ? <Pin className="mr-1 inline h-3.5 w-3.5 text-[var(--color-accent)]" aria-hidden /> : null}
+                            {sheet.title}
+                          </h3>
                           <p className="truncate text-xs font-medium text-gray-500 dark:text-gray-400">{badge}</p>
                         </div>
                       </Link>
@@ -593,7 +628,7 @@ export default function DashboardClient(props: {
 
         {segment === "drive" ? (
           <div className="mx-auto flex max-w-6xl flex-col gap-6">
-            <div className="glass-panel flex flex-wrap items-center justify-between gap-3 rounded-2xl px-4 py-3 text-sm">
+            <div className="glass-thick flex flex-wrap items-center justify-between gap-3 rounded-2xl px-4 py-3 text-sm">
               <span className="font-semibold text-gray-600 dark:text-gray-300">Personal storage</span>
               <span className="font-mono text-xs text-gray-500 dark:text-gray-400">
                 {fmtStorage(personalStorage.used, personalStorage.quota)}
@@ -629,7 +664,10 @@ export default function DashboardClient(props: {
                           <Pencil className="h-9 w-9 text-gray-300 dark:text-gray-600" />
                         )}
                       </div>
-                      <h3 className="truncate text-sm font-semibold">{sheet.title}</h3>
+                      <h3 className="truncate text-sm font-semibold">
+                        {sheet.pinned ? <Pin className="mr-1 inline h-3.5 w-3.5 text-[var(--color-accent)]" aria-hidden /> : null}
+                        {sheet.title}
+                      </h3>
                     </Link>
                   ) : (
                     <Link key={sheet._id} href={`/sheet/${sheet._id}`} className="glass-panel flex items-center gap-4 p-3">
@@ -642,7 +680,10 @@ export default function DashboardClient(props: {
                           </span>
                         )}
                       </div>
-                      <h3 className="min-w-0 flex-1 truncate font-semibold">{sheet.title}</h3>
+                      <h3 className="min-w-0 flex-1 truncate font-semibold">
+                        {sheet.pinned ? <Pin className="mr-1 inline h-3.5 w-3.5 text-[var(--color-accent)]" aria-hidden /> : null}
+                        {sheet.title}
+                      </h3>
                     </Link>
                   )
                 )}
@@ -706,7 +747,10 @@ export default function DashboardClient(props: {
                             <Share2 className="h-9 w-9 text-gray-300 dark:text-gray-600" />
                           )}
                         </div>
-                        <h3 className="truncate text-sm font-semibold">{sheet.title}</h3>
+                        <h3 className="truncate text-sm font-semibold">
+                          {sheet.pinned ? <Pin className="mr-1 inline h-3.5 w-3.5 text-[var(--color-accent)]" aria-hidden /> : null}
+                          {sheet.title}
+                        </h3>
                         <p className="text-[11px] font-semibold text-[var(--color-accent)]">Role: {sheet.role}</p>
                       </Link>
                     ) : (
@@ -725,7 +769,10 @@ export default function DashboardClient(props: {
                           )}
                         </div>
                         <div className="min-w-0 flex-1">
-                          <h3 className="truncate font-semibold">{sheet.title}</h3>
+                          <h3 className="truncate font-semibold">
+                            {sheet.pinned ? <Pin className="mr-1 inline h-3.5 w-3.5 text-[var(--color-accent)]" aria-hidden /> : null}
+                            {sheet.title}
+                          </h3>
                           <p className="text-xs font-medium text-[var(--color-accent)]">Role: {sheet.role}</p>
                         </div>
                       </Link>
@@ -764,7 +811,10 @@ export default function DashboardClient(props: {
                             <Share2 className="h-9 w-9 text-gray-300 dark:text-gray-600" />
                           )}
                         </div>
-                        <h3 className="truncate text-sm font-semibold">{sheet.title}</h3>
+                        <h3 className="truncate text-sm font-semibold">
+                          {sheet.pinned ? <Pin className="mr-1 inline h-3.5 w-3.5 text-[var(--color-accent)]" aria-hidden /> : null}
+                          {sheet.title}
+                        </h3>
                       </Link>
                     </div>
                   ) : (
@@ -777,7 +827,10 @@ export default function DashboardClient(props: {
                             <Share2 className="h-5 w-5 text-gray-400" />
                           )}
                         </div>
-                        <h3 className="min-w-0 flex-1 truncate font-semibold">{sheet.title}</h3>
+                        <h3 className="min-w-0 flex-1 truncate font-semibold">
+                          {sheet.pinned ? <Pin className="mr-1 inline h-3.5 w-3.5 text-[var(--color-accent)]" aria-hidden /> : null}
+                          {sheet.title}
+                        </h3>
                       </Link>
                       {sheetMenuBase ? (
                         <div className="shrink-0" onClick={(e) => e.preventDefault()}>
@@ -916,7 +969,7 @@ export default function DashboardClient(props: {
               <EmptyOrgs />
             ) : (
               <>
-                <div className="glass-panel flex flex-wrap items-center justify-between gap-3 rounded-2xl px-4 py-3 text-sm">
+                <div className="glass-thick flex flex-wrap items-center justify-between gap-3 rounded-2xl px-4 py-3 text-sm">
                   <span className="font-semibold text-gray-600 dark:text-gray-300">Org storage</span>
                   <span className="font-mono text-xs text-gray-500 dark:text-gray-400">
                     {orgTab && orgStorageByOrg[orgTab]
@@ -999,7 +1052,10 @@ export default function DashboardClient(props: {
                                   <Pencil className="h-9 w-9 text-gray-300" />
                                 )}
                               </div>
-                              <h3 className="truncate text-sm font-semibold">{sheet.title}</h3>
+                              <h3 className="truncate text-sm font-semibold">
+                                {sheet.pinned ? <Pin className="mr-1 inline h-3.5 w-3.5 text-[var(--color-accent)]" aria-hidden /> : null}
+                                {sheet.title}
+                              </h3>
                               {live ? (
                                 <p className="mt-1.5 flex min-h-0 items-center gap-1.5 text-[10px] font-semibold text-[var(--color-accent)]">
                                   <span className="h-1.5 w-1.5 shrink-0 animate-pulse rounded-full bg-[var(--color-accent)]" />
@@ -1017,7 +1073,10 @@ export default function DashboardClient(props: {
                                 )}
                               </div>
                               <div className="min-w-0 flex-1">
-                                <h3 className="truncate font-semibold">{sheet.title}</h3>
+                                <h3 className="truncate font-semibold">
+                                  {sheet.pinned ? <Pin className="mr-1 inline h-3.5 w-3.5 text-[var(--color-accent)]" aria-hidden /> : null}
+                                  {sheet.title}
+                                </h3>
                                 {live ? (
                                   <p className="mt-1 flex items-center gap-1.5 text-[10px] font-semibold text-[var(--color-accent)]">
                                     <span className="h-1.5 w-1.5 shrink-0 animate-pulse rounded-full bg-[var(--color-accent)]" />
@@ -1052,7 +1111,7 @@ export default function DashboardClient(props: {
       </main>
 
       {folderModalOpen ? (
-        <div className="fixed inset-0 z-[100] flex items-center justify-center p-4">
+        <div className="fixed inset-0 z-[100] flex items-end justify-center p-4 sm:items-center">
           <button type="button" className="absolute inset-0 bg-black/50 backdrop-blur-sm" onClick={() => setFolderModalOpen(false)} />
           <div className="glass-menu relative z-10 w-full max-w-sm rounded-[1.75rem] p-6 shadow-2xl">
             <h2 className="mb-3 text-lg font-bold">New folder</h2>
@@ -1060,7 +1119,7 @@ export default function DashboardClient(props: {
               value={folderModalName}
               onChange={(e) => setFolderModalName(e.target.value)}
               placeholder="Folder name"
-              className="mb-4 w-full rounded-2xl border border-[var(--input-border)] bg-[var(--input-bg)] px-4 py-3 text-sm"
+              className="input-field mb-4 min-h-[48px] w-full rounded-2xl px-4 py-3 text-sm"
               autoFocus
             />
             <div className="flex justify-end gap-2">

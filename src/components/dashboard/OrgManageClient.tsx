@@ -80,13 +80,13 @@ export default function OrgManageClient({
 
   if (!isAdmin) {
     return (
-      <div className="mt-8 rounded-2xl border border-white/15 bg-black/[0.03] p-6 dark:bg-white/[0.04]">
-        <h2 className="mb-3 font-semibold">Members</h2>
+      <div className="rounded-[1.5rem] border border-[var(--glass-border)] bg-[var(--input-bg)] p-5">
+        <h2 className="mb-3 text-base font-semibold">Members</h2>
         <ul className="space-y-2 text-sm">
           {members.map((m) => (
             <li
               key={m.userId}
-              className="flex items-center justify-between gap-3 rounded-xl bg-white/60 px-3 py-2 dark:bg-black/30"
+              className="flex min-h-[52px] items-center justify-between gap-3 rounded-2xl bg-white/60 px-3 py-2 dark:bg-black/30"
             >
               <span className="flex min-w-0 items-center gap-3">
                 <UserAvatar image={m.image} name={m.name} size="sm" />
@@ -101,21 +101,21 @@ export default function OrgManageClient({
   }
 
   return (
-    <div className="mt-8 space-y-8">
-      <section className="rounded-2xl border border-white/15 bg-black/[0.03] p-6 dark:bg-white/[0.04]">
-        <h2 className="mb-3 font-semibold">Invite member</h2>
+    <div className="space-y-5">
+      <section className="rounded-[1.5rem] border border-[var(--glass-border)] bg-[var(--input-bg)] p-5">
+        <h2 className="mb-3 text-base font-semibold">Invite member</h2>
         <div className="flex flex-col gap-2 sm:flex-row">
           <input
             value={email}
             onChange={(e) => setEmail(e.target.value)}
             type="email"
             placeholder="email@company.com"
-            className="flex-1 rounded-xl border border-white/20 px-3 py-2 text-sm"
+            className="input-field min-h-[48px] flex-1 px-4 text-sm"
           />
           <select
             value={role}
             onChange={(e) => setRole(e.target.value as OrgMemberRole)}
-            className="rounded-xl border border-white/20 px-3 py-2 text-sm"
+            className="input-field min-h-[48px] rounded-2xl px-3 text-sm"
           >
             <option value="member">Member</option>
             <option value="guest">Guest</option>
@@ -124,7 +124,7 @@ export default function OrgManageClient({
           <button
             type="button"
             disabled={busy}
-            className="rounded-xl bg-[var(--color-accent)] px-4 py-2 text-sm font-semibold text-white disabled:opacity-50"
+            className="min-h-[48px] rounded-2xl bg-[var(--color-accent)] px-4 text-sm font-semibold text-white disabled:opacity-50"
             onClick={async () => {
               setBusy(true);
               try {
@@ -161,13 +161,13 @@ export default function OrgManageClient({
         onShowExpiredChange={setShowExpiredInvites}
       />
 
-      <section className="rounded-2xl border border-white/15 bg-black/[0.03] p-6 dark:bg-white/[0.04]">
-        <h2 className="mb-3 font-semibold">Members</h2>
+      <section className="rounded-[1.5rem] border border-[var(--glass-border)] bg-[var(--input-bg)] p-5">
+        <h2 className="mb-3 text-base font-semibold">Members</h2>
         <ul className="space-y-3">
           {members.map((m) => (
             <li
               key={m.userId}
-              className="flex flex-wrap items-center justify-between gap-2 rounded-xl bg-white/60 px-3 py-2 dark:bg-black/30"
+              className="flex min-h-[56px] flex-wrap items-center justify-between gap-2 rounded-2xl bg-white/60 px-3 py-2 dark:bg-black/30"
             >
               <div className="flex min-w-0 items-center gap-3">
                 <UserAvatar image={m.image} name={m.name} size="md" />
@@ -188,7 +188,7 @@ export default function OrgManageClient({
                       toastActionError(err, { id: "org-role-change" });
                     }
                   }}
-                  className="rounded-lg border border-white/20 bg-transparent px-2 py-1 text-xs"
+                  className="input-field min-h-[40px] rounded-xl bg-transparent px-2 text-xs"
                 >
                   <option value="admin">admin</option>
                   <option value="member">member</option>
@@ -196,7 +196,7 @@ export default function OrgManageClient({
                 </select>
                 <button
                   type="button"
-                  className="rounded-lg border border-red-500/40 px-2 py-1 text-xs font-semibold text-red-600"
+                  className="min-h-[40px] rounded-xl border border-red-500/40 px-2 py-1 text-xs font-semibold text-red-600"
                   onClick={async () => {
                     if (!confirm("Remove this member?")) return;
                     try {

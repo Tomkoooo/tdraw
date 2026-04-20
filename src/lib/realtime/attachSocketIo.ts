@@ -49,15 +49,28 @@ export function attachSocketIo(io: Server): void {
   if (!secret) throw new Error("AUTH_SECRET required for realtime");
 
   io.use((socket, next) => {
+    console.debug(`> [SOCKET] Incoming connection from: ${socket.handshake.address}`);
     const token = socket.handshake.auth?.token;
-    if (!token || typeof token !== "string") return next(new Error("Unauthorized"));
+    if (!token || typeof token !== "string") {
+      console.debug("> [SOCKET] Unauthorized: Missing token");
+      return next(new Error("Unauthorized"));
+    }
     const v = verifyRealtimeUserToken(token, secret);
-    if (!v) return next(new Error("Unauthorized"));
+    if (!v) {
+      console.debug("> [SOCKET] Unauthorized: Invalid token");
+      return next(new Error("Unauthorized"));
+    }
     socket.data.userId = v.userId;
     next();
   });
 
   io.on("connection", (socket) => {
+    const transport = socket.conn.transport.name;
+    console.info(`> [SOCKET] Connected: ${socket.id} (transport: ${transport}, address: ${socket.handshake.address})`);
+    
+    socket.conn.on("upgrade", (transport) => {
+      console.info(`> [SOCKET] Upgraded to transport: ${transport.name}`);
+    });
     const userId = socket.data.userId as string;
     const name = (socket.handshake.auth?.name as string) || "User";
     const color = (socket.handshake.auth?.color as string) || "#0071E3";

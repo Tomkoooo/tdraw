@@ -74,14 +74,14 @@ export default function TasksClient({
   };
 
   const block = (label: string, tasks: TaskRow[]) => (
-    <section key={label} className="glass-panel mt-8 rounded-[1.5rem] p-5">
-      <h2 className="mb-3 text-lg font-semibold">{label}</h2>
+    <section key={label} className="glass-thick mt-6 rounded-[1.5rem] p-5">
+      <h2 className="mb-3 text-base font-semibold">{label}</h2>
       <ul className="space-y-2">
         {tasks.length === 0 ? <li className="text-sm text-gray-500">No tasks.</li> : null}
         {tasks.map((t) => (
           <li
             key={t._id}
-            className="flex flex-wrap items-center justify-between gap-2 rounded-xl border border-[var(--input-border)] bg-[var(--input-bg)] px-3 py-2.5"
+            className="flex min-h-[52px] flex-wrap items-center justify-between gap-2 rounded-2xl border border-[var(--input-border)] bg-[var(--input-bg)] px-3 py-2.5"
           >
             <div className="min-w-0 flex-1">
               <span className={t.status === "done" ? "line-through opacity-60" : ""}>{t.title}</span>
@@ -127,12 +127,12 @@ export default function TasksClient({
 
   return (
     <>
-      <form onSubmit={(e) => void submit(e)} className="glass-panel mt-6 flex flex-col gap-4 rounded-[1.5rem] p-5">
+      <form onSubmit={(e) => void submit(e)} className="glass-thick mt-6 flex flex-col gap-4 rounded-[1.5rem] p-5">
         <input
           value={title}
           onChange={(e) => setTitle(e.target.value)}
           placeholder="New task…"
-          className="rounded-2xl border border-[var(--input-border)] bg-[var(--input-bg)] px-4 py-3 text-sm"
+          className="input-field min-h-[48px] px-4 text-sm"
         />
         <label className="text-xs font-semibold text-gray-500 dark:text-gray-400">
           Due (optional)
@@ -140,7 +140,7 @@ export default function TasksClient({
             type="datetime-local"
             value={dueAt}
             onChange={(e) => setDueAt(e.target.value)}
-            className="mt-1 w-full rounded-2xl border border-[var(--input-border)] bg-[var(--input-bg)] px-3 py-2 text-sm"
+            className="input-field mt-1 min-h-[48px] w-full px-3 text-sm"
           />
         </label>
         <div className="flex flex-wrap gap-1 rounded-[1.25rem] bg-black/[0.04] p-1 dark:bg-white/[0.06]">
@@ -171,7 +171,7 @@ export default function TasksClient({
               setOrgId(e.target.value);
               setAssigneeUserId("");
             }}
-            className="rounded-2xl border border-[var(--input-border)] bg-[var(--input-bg)] px-4 py-3 text-sm font-semibold"
+            className="input-field min-h-[48px] rounded-2xl px-4 text-sm font-semibold"
           >
             {orgs.map((o) => (
               <option key={o._id} value={o._id}>
@@ -189,7 +189,7 @@ export default function TasksClient({
                 setAssignAll(e.target.checked);
                 if (e.target.checked) setAssigneeUserId("");
               }}
-              className="h-4 w-4 rounded border-[var(--input-border)]"
+            className="h-4 w-4 rounded border-[var(--input-border)]"
             />
             Whole organization
           </label>
@@ -199,7 +199,7 @@ export default function TasksClient({
               type="checkbox"
               checked={assigneeUserId === "__self"}
               onChange={(e) => setAssigneeUserId(e.target.checked ? "__self" : "")}
-              className="h-4 w-4 rounded border-[var(--input-border)]"
+            className="h-4 w-4 rounded border-[var(--input-border)]"
             />
             Assign to me
           </label>
@@ -208,7 +208,7 @@ export default function TasksClient({
           <select
             value={assigneeUserId}
             onChange={(e) => setAssigneeUserId(e.target.value)}
-            className="rounded-2xl border border-[var(--input-border)] bg-[var(--input-bg)] px-4 py-3 text-sm"
+            className="input-field min-h-[48px] rounded-2xl px-4 text-sm"
           >
             <option value="">No specific assignee</option>
             {members.map((m) => (
@@ -218,7 +218,7 @@ export default function TasksClient({
             ))}
           </select>
         ) : null}
-        <button type="submit" className="min-h-[48px] rounded-2xl bg-[var(--color-accent)] text-sm font-semibold text-white">
+        <button type="submit" className="min-h-[50px] rounded-2xl bg-[var(--color-accent)] text-sm font-semibold text-white">
           Add task
         </button>
       </form>

@@ -19,7 +19,7 @@ import {
 } from "@dnd-kit/sortable";
 import { CSS } from "@dnd-kit/utilities";
 import Link from "next/link";
-import { GripVertical, Pencil } from "lucide-react";
+import { GripVertical, Pencil, Pin } from "lucide-react";
 import { reorderOrgSheets } from "@/lib/actions/sheet";
 import { useRouter } from "next/navigation";
 import { toastActionError } from "@/lib/client/actionFeedback";
@@ -86,7 +86,10 @@ function SortableOrgSheet({
             )}
           </div>
           <div className="min-w-0 flex-1">
-            <h3 className="truncate font-semibold">{sheet.title}</h3>
+            <h3 className="truncate font-semibold">
+              {sheet.pinned ? <Pin className="mr-1 inline h-3.5 w-3.5 text-[var(--color-accent)]" aria-hidden /> : null}
+              {sheet.title}
+            </h3>
             <p className="text-xs text-gray-500">{new Date(sheet.updatedAt).toLocaleDateString()}</p>
             {editing ? (
               <p className="mt-1.5 text-[10px] font-bold uppercase tracking-wide text-gray-500">Being edited</p>
@@ -126,7 +129,10 @@ function SortableOrgSheet({
             <Pencil className="h-9 w-9 text-gray-300 dark:text-gray-600" />
           )}
         </div>
-        <h3 className="truncate text-sm font-semibold">{sheet.title}</h3>
+        <h3 className="truncate text-sm font-semibold">
+          {sheet.pinned ? <Pin className="mr-1 inline h-3.5 w-3.5 text-[var(--color-accent)]" aria-hidden /> : null}
+          {sheet.title}
+        </h3>
         <p className="text-[10px] text-gray-500">{new Date(sheet.updatedAt).toLocaleDateString()}</p>
         {editing ? (
           <div className="mt-2 space-y-1">

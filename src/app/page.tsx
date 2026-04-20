@@ -1,6 +1,7 @@
 import SignInButton from "@/components/SignInButton";
 import { auth } from "@/auth";
 import { redirect } from "next/navigation";
+import { PencilLine } from "lucide-react";
 
 export default async function Home({ searchParams }: { searchParams: Promise<{ callbackUrl?: string }> }) {
   const session = await auth();
@@ -18,25 +19,19 @@ export default async function Home({ searchParams }: { searchParams: Promise<{ c
     <div className="relative flex min-h-[100dvh] flex-col items-center justify-center overflow-x-hidden bg-[var(--bg-canvas)] px-6">
       <div className="pointer-events-none absolute inset-0 z-0">
         <div className="absolute -left-[20%] top-[-15%] h-[55vmin] w-[55vmin] rounded-full bg-[var(--color-accent)] opacity-[0.12] blur-[100px]" />
-        <div className="absolute -right-[15%] bottom-[-20%] h-[45vmin] w-[45vmin] rounded-full bg-[#5856D6] opacity-[0.08] blur-[90px]" />
+        <div className="absolute -right-[15%] bottom-[-20%] h-[45vmin] w-[45vmin] rounded-full bg-[var(--color-accent)] opacity-[0.08] blur-[90px]" />
       </div>
 
-      <div className="relative z-[100] isolate flex w-full max-w-md flex-col items-center pointer-events-auto">
-        <div className="glass-thick pointer-events-auto relative z-10 mb-8 flex w-full flex-col items-center rounded-[2.5rem] p-10 text-center shadow-2xl">
-          <div className="mb-8 flex h-24 w-24 items-center justify-center rounded-[2rem] bg-[var(--color-accent)]/15 shadow-inner">
-            <svg
-              className="w-12 h-12 text-white"
-              fill="none"
-              stroke="currentColor"
-              viewBox="0 0 24 24"
-              xmlns="http://www.w3.org/2000/svg"
-            >
-              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2.5} d="M15.232 5.232l3.536 3.536m-2.036-5.036a2.5 2.5 0 113.536 3.536L6.5 21.036H3v-3.572L16.732 3.732z" />
-            </svg>
+      <div className="relative z-[100] isolate flex w-full max-w-xl flex-col items-center pointer-events-auto">
+        <div className="glass-thick pointer-events-auto relative z-10 mb-8 flex w-full flex-col items-center rounded-[2.25rem] p-8 text-center shadow-2xl md:p-12">
+          <div className="mb-7 flex h-24 w-24 items-center justify-center rounded-[2rem] bg-[var(--color-accent)]/14 text-[var(--color-accent)] shadow-inner">
+            <PencilLine className="h-11 w-11" strokeWidth={2.2} />
           </div>
-          <h1 className="mb-3 text-5xl font-extrabold tracking-tight text-[var(--color-text)]">tDraw</h1>
-          <p className="mb-10 text-lg font-medium leading-relaxed text-gray-500 dark:text-gray-400">
-            Calm, glass-native notes for iPad — draw, share, and stay in flow.
+          <h1 className="mb-3 text-5xl font-extrabold tracking-tight text-[var(--color-text)] md:text-6xl">tDraw</h1>
+          <p className="mb-2 text-base font-semibold text-[var(--color-accent)]">iPad + Apple Pencil first</p>
+          <p className="mb-10 max-w-md text-base leading-relaxed text-gray-500 dark:text-gray-400">
+            A calm canvas workspace for handwriting, sketching, and collaboration. Minimal chrome, fluid touch targets, and
+            real-time sync.
           </p>
           <div className="w-full">
             <SignInButton redirectTo={callbackUrl} />

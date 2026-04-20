@@ -4,6 +4,7 @@ import Link from "next/link";
 import { listEvents } from "@/lib/actions/calendar";
 import { listMyOrganizations, listOrgMembersForAssignment } from "@/lib/actions/org";
 import CalendarClient from "@/components/dashboard/CalendarClient";
+import { CalendarDays, ChevronLeft } from "lucide-react";
 
 export default async function CalendarPage() {
   const session = await auth();
@@ -24,18 +25,35 @@ export default async function CalendarPage() {
   const orgMembersByOrg = Object.fromEntries(orgMembersEntries);
 
   return (
-    <div className="mx-auto max-w-5xl p-6 md:p-10">
-      <Link href="/dashboard" className="mb-6 inline-block text-sm font-semibold text-[var(--color-accent)]">
-        ← Dashboard
-      </Link>
-      <h1 className="text-2xl font-bold">Calendar</h1>
-      <CalendarClient
-        personal={personal}
-        orgBlocks={orgEvents}
-        orgs={orgs}
-        orgMembersByOrg={orgMembersByOrg}
-        currentUserId={session.user.id}
-      />
+    <div className="min-h-screen bg-[var(--bg-canvas)] px-4 pb-32 pt-safe-top md:px-8">
+      <div className="mx-auto max-w-6xl space-y-4 md:pt-4">
+        <div className="glass-thick rounded-[1.75rem] p-4 md:p-5">
+          <div className="flex flex-wrap items-center justify-between gap-3">
+            <Link
+              href="/dashboard"
+              className="inline-flex min-h-[44px] items-center gap-2 rounded-2xl px-4 text-sm font-semibold hover:bg-black/5 dark:hover:bg-white/10"
+            >
+              <ChevronLeft className="h-4 w-4" />
+              Dashboard
+            </Link>
+            <div className="flex items-center gap-2 rounded-2xl bg-[var(--input-bg)] px-3 py-2 text-sm font-semibold">
+              <CalendarDays className="h-4 w-4 text-[var(--color-accent)]" />
+              Personal + organization calendars
+            </div>
+          </div>
+          <h1 className="mt-4 text-2xl font-bold md:text-3xl">Calendar</h1>
+          <p className="mt-1 text-sm text-gray-500 dark:text-gray-400">
+            Select to create, tap to inspect, and switch calendar layers without losing context.
+          </p>
+        </div>
+        <CalendarClient
+          personal={personal}
+          orgBlocks={orgEvents}
+          orgs={orgs}
+          orgMembersByOrg={orgMembersByOrg}
+          currentUserId={session.user.id}
+        />
+      </div>
     </div>
   );
 }

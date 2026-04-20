@@ -411,7 +411,8 @@ export async function saveSheetState(
   id: string,
   canvasState: unknown,
   previewImage?: string,
-  clientVersion?: number
+  clientVersion?: number,
+  forceOverwrite?: boolean,
 ) {
   const session = await auth();
   if (!session?.user?.id) throw new Error("Unauthorized");
@@ -419,19 +420,39 @@ export async function saveSheetState(
   await dbConnect();
   await requireSheetPermission(session.user.id, id, "write");
 
-  const current = await Sheet.findById(id).select("contentVersion deletedAt").lean();
+  const current = await Sheet.findById(id).select("contentVersion deletedAt canvasState").lean();
   if (!current) throw new Error("Not found");
   if (current.deletedAt) throw new Error("Cannot save a trashed note — restore it first");
 
   const serverV = current.contentVersion ?? 0;
-  if (typeof clientVersion === "number" && clientVersion < serverV) {
+  if (!forceOverwrite && typeof clientVersion === "number" && clientVersion < serverV) {
     return { success: false, conflict: true as const, contentVersion: serverV };
   }
 
   const nextVersion = serverV + 1;
-  const approxBytes = approxStateBytes(canvasState);
+  let nextCanvasState = canvasState;
+  if (
+    canvasState &&
+    typeof canvasState === "object" &&
+    current &&
+    typeof (current as { canvasState?: unknown }).canvasState === "object" &&
+    (current as { canvasState?: unknown }).canvasState !== null
+  ) {
+    const incoming = canvasState as { files?: unknown };
+    const existing = (current as { canvasState?: { files?: unknown } }).canvasState;
+    const incomingFileCount =
+      incoming.files && typeof incoming.files === "object" ? Object.keys(incoming.files as Record<string, unknown>).length : 0;
+    if (incomingFileCount === 0 && existing?.files && typeof existing.files === "object") {
+      nextCanvasState = {
+        ...(canvasState as Record<string, unknown>),
+        files: existing.files,
+      };
+    }
+  }
+
+  const approxBytes = approxStateBytes(nextCanvasState);
   await Sheet.findByIdAndUpdate(id, {
-    canvasState,
+    canvasState: nextCanvasState,
     ...(previewImage && { previewImage }),
     contentVersion: nextVersion,
     approxBytes,
