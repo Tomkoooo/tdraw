@@ -31,6 +31,7 @@ import SheetShareForm from "@/components/SheetShareForm";
 import ConfirmDialog from "@/components/ConfirmDialog";
 import { pathToFolder, toRows } from "./treeUtil";
 import OrgWorkspaceRealtime, { type DocEditActivity, type OnlineMember } from "@/components/realtime/OrgWorkspaceRealtime";
+import DocActivityRealtime, { type DocPresenceMap } from "@/components/realtime/DocActivityRealtime";
 import LibraryBreadcrumbs from "./Breadcrumbs";
 import { DND_ROOT_ORG } from "./types";
 import type { SheetCard, LibraryNode, DriveSort, ViewMode, SharedSub, FolderTreeEntry } from "./types";
@@ -103,6 +104,8 @@ type LibraryShellViewProps = {
   ctx: Ctx | null;
   setOrgOnline: (m: OnlineMember[]) => void;
   setOrgAct: (a: Record<string, DocEditActivity | null>) => void;
+  docPresence: DocPresenceMap;
+  setDocPresence: (m: DocPresenceMap) => void;
 };
 
 function sortNotes<T extends { title: string; updatedAt: string; createdAt: string; pinned?: boolean }>(list: T[], sort: DriveSort) {
@@ -253,6 +256,8 @@ export default function LibraryShellView(v: LibraryShellViewProps) {
 
   const isOwnSheet = (s: SheetCard) => s.userId == null || s.userId === p.userId;
 
+  const docSheetIds = useMemo(() => notesInView.map((n) => n._id), [notesInView]);
+
   return (
     <div className="flex min-h-screen flex-col bg-[var(--bg-canvas)]">
       <OrgWorkspaceRealtime
@@ -262,6 +267,9 @@ export default function LibraryShellView(v: LibraryShellViewProps) {
         onOnlineChange={v.setOrgOnline}
         onDocActivity={v.setOrgAct}
       />
+      {docSheetIds.length > 0 ? (
+        <DocActivityRealtime sheetIds={docSheetIds} onPresence={v.setDocPresence} />
+      ) : null}
       <DndContext
         sensors={sensors}
         collisionDetection={closestCenter}
@@ -476,6 +484,7 @@ export default function LibraryShellView(v: LibraryShellViewProps) {
                         selected={v.sel.has(s._id)}
                         selectMode={v.selectMode}
                         dndEnabled={false}
+                        docPresence={v.docPresence[s._id] ?? null}
                         onSelectToggle={(id) => {
                           v.setSelectMode(true);
                           v.setSel((prev) => {

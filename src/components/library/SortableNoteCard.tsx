@@ -28,6 +28,8 @@ export default function SortableNoteCard({
   onSelectToggle: (id: string) => void;
   onContextMenu: (e: React.MouseEvent, sheet: SheetCard) => void;
   sortable?: boolean;
+  /** Live presence on this note (from doc:activity). */
+  docPresence?: { userId: string; name: string; image?: string; editing?: boolean; active?: boolean }[] | null;
 }) {
   const { setNodeRef, transform, transition, isDragging, attributes, listeners, isOver } = useSortable({
     id: dndIdNote(sheet._id),

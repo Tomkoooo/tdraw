@@ -7,6 +7,7 @@ import { io, type Socket } from "socket.io-client";
 import localforage from "localforage";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { toast } from "sonner";
+import { sceneCoordsToViewportCoords, viewportCoordsToSceneCoords } from "@excalidraw/excalidraw";
 import {
   ChevronLeft,
   ChevronRight,
@@ -89,6 +90,24 @@ type MinimapState = {
   viewport: { x: number; y: number; width: number; height: number } | null;
 };
 
+type SheetPresenceMember = {
+  fromSocketId: string;
+  userId: string;
+  name: string;
+  color: string;
+  image?: string;
+  editing?: boolean;
+};
+
+type RemoteCursor = {
+  x: number;
+  y: number;
+  pageId?: string;
+  color: string;
+  name: string;
+  at: number;
+};
+
 const queueKey = (sheetId: string) => `excalidraw-save-queue-${sheetId}`;
 const cachedDocKey = (sheetId: string) => `excalidraw-cached-doc-${sheetId}`;
 const DEFAULT_PAGE_NAME = "Page 1";
@@ -106,6 +125,24 @@ function isSceneElement(value: unknown): value is Record<string, unknown> {
     typeof value.y === "number" &&
     typeof value.width === "number" &&
     typeof value.height === "number"
+  );
+}
+
+function getErrorMessage(error: unknown): string {
+  if (error instanceof Error && error.message.trim().length > 0) return error.message;
+  if (typeof error === "string" && error.trim().length > 0) return error;
+  return "Unknown error";
+}
+
+function isLikelyNetworkSaveError(error: unknown): boolean {
+  const message = getErrorMessage(error).toLowerCase();
+  return (
+    message.includes("failed to fetch") ||
+    message.includes("networkerror") ||
+    message.includes("network error") ||
+    message.includes("load failed") ||
+    message.includes("err_network") ||
+    message.includes("fetch failed")
   );
 }
 
@@ -251,7 +288,10 @@ export default function ExcalidrawEditor({
   const [documentState, setDocumentState] = useState<PersistedDocument>(() => parsePersistedDocument(initialData));
   const [activePageId, setActivePageId] = useState(() => parsePersistedDocument(initialData).activePageId);
   const [isClearing, setIsClearing] = useState(false);
-  const [members, setMembers] = useState<Record<string, { name: string; color: string; image?: string }>>({});
+  const [members, setMembers] = useState<Record<string, SheetPresenceMember>>({});
+  const [mySocketId, setMySocketId] = useState<string | null>(null);
+  const [remoteCursors, setRemoteCursors] = useState<Record<string, RemoteCursor>>({});
+  const [cursorRerender, setCursorRerender] = useState(0);
   const [excalidrawTheme, setExcalidrawTheme] = useState<"light" | "dark">("light");
   const [saveState, setSaveState] = useState<SaveState>("saved");
   const [isOnline, setIsOnline] = useState(true);
@@ -271,6 +311,20 @@ export default function ExcalidrawEditor({
   const sceneFingerprintRef = useRef("");
   const versionRef = useRef(Number.isFinite(contentVersion) ? contentVersion : 0);
   const docStateRef = useRef<PersistedDocument>(parsePersistedDocument(initialData));
+  const activePageIdRef = useRef(activePageId);
+  const mySocketIdRef = useRef<string | null>(null);
+  const liveSceneDebounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const lastLiveFileIdsRef = useRef<Set<string>>(new Set());
+  const lastCursorEmitRef = useRef(0);
+  const remoteCursorsRef = useRef<Record<string, RemoteCursor>>({});
+  const lastLocalSceneEditAtRef = useRef(0);
+  const saveRunningRef = useRef(false);
+  const saveAgainRef = useRef(false);
+  const saveAgainForceRef = useRef(false);
+
+  useEffect(() => {
+    remoteCursorsRef.current = remoteCursors;
+  }, [remoteCursors]);
 
   const userColor = useMemo(() => {
     const palette = ["#0071E3", "#34C759", "#FF9500", "#AF52DE", "#FF2D55"];
@@ -279,10 +333,24 @@ export default function ExcalidrawEditor({
     return palette[h % palette.length];
   }, [sheetId]);
 
-  const visibleMembers = useMemo(
-    () => Object.entries(members).filter(([id]) => !userId || id !== userId),
-    [members, userId],
-  );
+  useEffect(() => {
+    activePageIdRef.current = activePageId;
+  }, [activePageId]);
+
+  useEffect(() => {
+    mySocketIdRef.current = mySocketId;
+  }, [mySocketId]);
+
+  const membersGrouped = useMemo(() => {
+    const byUser = new Map<string, SheetPresenceMember[]>();
+    for (const m of Object.values(members)) {
+      if (mySocketId && m.fromSocketId === mySocketId) continue;
+      const list = byUser.get(m.userId) ?? [];
+      list.push(m);
+      byUser.set(m.userId, list);
+    }
+    return Array.from(byUser.entries());
+  }, [members, mySocketId]);
   const activePage = useMemo(
     () => documentState.pages.find((page) => page.id === activePageId) ?? documentState.pages[0],
     [activePageId, documentState.pages],
@@ -350,54 +418,117 @@ export default function ExcalidrawEditor({
     };
   }, [activePageId, createSnapshot]);
 
-  const flushSave = useCallback(
-    async (forceOverwrite = false) => {
+  const executeFlushSave = useCallback(
+    async (forceOverwrite: boolean) => {
       const api = apiRef.current;
       if (!api || !canWrite || blockSyncRef.current) return;
 
-      const snapshot = createDocumentSnapshot(api);
       setSaveState("saving");
+      let snapshot: PersistedDocument | null = null;
       try {
-        const res = await saveSheetState(
-          sheetId,
-          snapshot,
-          undefined,
-          forceOverwrite ? undefined : versionRef.current,
-          forceOverwrite,
-        );
-        if ("conflict" in res && res.conflict) {
-          setSaveState("unsaved");
-          toast.error("Couldn’t save — this note was updated elsewhere.", {
-            id: "sheet-save-conflict",
-            action: { label: "Reload", onClick: () => router.refresh() },
+        for (let conflictAttempt = 0; conflictAttempt < 2; conflictAttempt++) {
+          snapshot = createDocumentSnapshot(api);
+          const res = await saveSheetState(
+            sheetId,
+            snapshot,
+            undefined,
+            forceOverwrite ? undefined : versionRef.current,
+            forceOverwrite,
+          );
+          if ("conflict" in res && res.conflict) {
+            if (typeof res.contentVersion === "number") {
+              versionRef.current = res.contentVersion;
+            }
+            if (conflictAttempt === 0) continue;
+            setSaveState("unsaved");
+            toast.error("Couldn’t save — this note was updated elsewhere.", {
+              id: "sheet-save-conflict",
+              action: { label: "Reload", onClick: () => router.refresh() },
+            });
+            return;
+          }
+          if ("contentVersion" in res && typeof res.contentVersion === "number") {
+            versionRef.current = res.contentVersion;
+          }
+          break;
+        }
+        if (!snapshot) return;
+        const savedDoc = snapshot;
+
+        const sentPage = savedDoc.pages.find((p) => p.id === savedDoc.activePageId) ?? savedDoc.pages[0];
+        const currentDoc = docStateRef.current;
+        const currentPage = currentDoc.pages.find((p) => p.id === savedDoc.activePageId) ?? currentDoc.pages[0];
+        const sentFingerprint = buildSceneFingerprint(sentPage?.elements ?? []);
+        const currentFingerprint = buildSceneFingerprint(currentPage?.elements ?? []);
+        const hasNewerLocalEdits = sentFingerprint !== currentFingerprint;
+
+        if (!hasNewerLocalEdits) {
+          setDocumentState(savedDoc);
+          docStateRef.current = savedDoc;
+          await localforage.setItem(cachedDocKey(sheetId), savedDoc);
+          sceneFingerprintRef.current = buildSceneFingerprint(api.getSceneElements() as unknown as Record<string, unknown>[]);
+          hasLocalUnsavedEditsRef.current = false;
+          setSaveState("saved");
+          socketRef.current?.emit("sheet:snapshot", { sheetId, snapshot: savedDoc, contentVersion: versionRef.current });
+        } else {
+          // Save succeeded for an older snapshot; keep newer in-memory edits and avoid reverting the canvas.
+          setDocumentState((prev) => {
+            const merged: PersistedDocument = {
+              ...prev,
+              files: { ...prev.files, ...savedDoc.files },
+            };
+            docStateRef.current = merged;
+            void localforage.setItem(cachedDocKey(sheetId), merged);
+            return merged;
           });
-          return;
+          setSaveState("unsaved");
         }
-        if ("contentVersion" in res && typeof res.contentVersion === "number") {
-          versionRef.current = res.contentVersion;
-        }
-        setDocumentState(snapshot);
-        docStateRef.current = snapshot;
-        await localforage.setItem(cachedDocKey(sheetId), snapshot);
-        sceneFingerprintRef.current = buildSceneFingerprint(api.getSceneElements() as unknown as Record<string, unknown>[]);
-        hasLocalUnsavedEditsRef.current = false;
-        setSaveState("saved");
-        socketRef.current?.emit("sheet:snapshot", { sheetId, snapshot, contentVersion: versionRef.current });
       } catch (err) {
         console.error(err);
-        try {
-          const queue = ((await localforage.getItem<unknown[]>(queueKey(sheetId))) ?? []) as unknown[];
-          queue.push({ snapshot, at: Date.now(), v: versionRef.current });
-          await localforage.setItem(queueKey(sheetId), queue);
-          setSaveState("offlineQueued");
-          toast.warning("Save queued offline. It will sync when back online.");
-        } catch {
-          setSaveState("unsaved");
-          toast.error("Couldn’t save note.");
+        const navigatorOffline = typeof navigator !== "undefined" && !navigator.onLine;
+        const shouldQueueOffline = navigatorOffline || isLikelyNetworkSaveError(err);
+        if (shouldQueueOffline && snapshot) {
+          try {
+            const queue = ((await localforage.getItem<unknown[]>(queueKey(sheetId))) ?? []) as unknown[];
+            queue.push({ snapshot, at: Date.now(), v: versionRef.current });
+            await localforage.setItem(queueKey(sheetId), queue);
+            setSaveState("offlineQueued");
+            toast.warning("Save queued offline. It will sync when back online.");
+            return;
+          } catch {
+            // Fall through to regular save failure state.
+          }
         }
+        setSaveState("unsaved");
+        toast.error(`Couldn’t save note: ${getErrorMessage(err)}`);
       }
     },
     [canWrite, createDocumentSnapshot, router, sheetId],
+  );
+
+  const flushSave = useCallback(
+    async (forceOverwrite = false) => {
+      if (saveRunningRef.current) {
+        saveAgainRef.current = true;
+        if (forceOverwrite) saveAgainForceRef.current = true;
+        return;
+      }
+      saveRunningRef.current = true;
+      let isFirstPass = true;
+      try {
+        for (;;) {
+          saveAgainRef.current = false;
+          const force = (isFirstPass && forceOverwrite) || saveAgainForceRef.current;
+          isFirstPass = false;
+          saveAgainForceRef.current = false;
+          await executeFlushSave(force);
+          if (!saveAgainRef.current) break;
+        }
+      } finally {
+        saveRunningRef.current = false;
+      }
+    },
+    [executeFlushSave],
   );
 
   useEffect(() => {
@@ -464,6 +595,25 @@ export default function ExcalidrawEditor({
     }, 1200);
   }, [canWrite, flushSave]);
 
+  const pointerAppState = useCallback((api: ExcalidrawImperativeApiLike) => {
+    return api.getAppState() as unknown as Parameters<typeof viewportCoordsToSceneCoords>[1];
+  }, []);
+
+  const onEditorPointerMove = useCallback(
+    (e: React.PointerEvent) => {
+      if (e.pointerType === "touch") return;
+      const api = apiRef.current;
+      const s = socketRef.current;
+      if (!api || !s?.connected || !canWrite) return;
+      const now = Date.now();
+      if (now - lastCursorEmitRef.current < 50) return;
+      lastCursorEmitRef.current = now;
+      const { x, y } = viewportCoordsToSceneCoords({ clientX: e.clientX, clientY: e.clientY }, pointerAppState(api));
+      s.emit("presence:cursor", { sheetId, pageId: activePageIdRef.current, x, y });
+    },
+    [canWrite, pointerAppState, sheetId],
+  );
+
   const onExcalidrawChange = useCallback((elements: readonly unknown[], appState: unknown) => {
       const typedElements = elements.filter(isSceneElement);
       const sceneBounds = getElementBounds(typedElements);
@@ -502,20 +652,63 @@ export default function ExcalidrawEditor({
         void localforage.setItem(cachedDocKey(sheetId), updated);
         return updated;
       });
+      lastLocalSceneEditAtRef.current = Date.now();
+
+      if (canWrite && !blockSyncRef.current) {
+        if (liveSceneDebounceRef.current) clearTimeout(liveSceneDebounceRef.current);
+        liveSceneDebounceRef.current = setTimeout(() => {
+          liveSceneDebounceRef.current = null;
+          if (blockSyncRef.current) return;
+          const s = socketRef.current;
+          if (!s?.connected) return;
+          const api = apiRef.current;
+          if (!api) return;
+          const pageId = activePageIdRef.current;
+          const fmap = api.getFiles() as unknown as Record<string, SceneFile>;
+          const out: Record<string, SceneFile> = {};
+          for (const [k, f] of Object.entries(fmap)) {
+            if (!lastLiveFileIdsRef.current.has(k)) {
+              out[k] = f;
+              lastLiveFileIdsRef.current.add(k);
+            }
+          }
+          s.emit("sheet:scene", {
+            sheetId,
+            pageId,
+            elements: api.getSceneElements() as unknown as Record<string, unknown>[],
+            files: Object.keys(out).length > 0 ? out : undefined,
+          });
+          s.emit("sheet:editing", { sheetId });
+        }, 500);
+      }
 
       const nextFingerprint = buildSceneFingerprint(typedElements);
       if (!autosaveArmedRef.current) {
         sceneFingerprintRef.current = nextFingerprint;
+        if (Object.keys(remoteCursorsRef.current).length > 0) {
+          setCursorRerender((c) => c + 1);
+        }
         return;
       }
       if (Date.now() < ignoreAutosaveUntilRef.current) {
         sceneFingerprintRef.current = nextFingerprint;
+        if (Object.keys(remoteCursorsRef.current).length > 0) {
+          setCursorRerender((c) => c + 1);
+        }
         return;
       }
-      if (nextFingerprint === sceneFingerprintRef.current) return;
+      if (nextFingerprint === sceneFingerprintRef.current) {
+        if (Object.keys(remoteCursorsRef.current).length > 0) {
+          setCursorRerender((c) => c + 1);
+        }
+        return;
+      }
       sceneFingerprintRef.current = nextFingerprint;
       onSceneChange();
-    }, [activePageId, onSceneChange, sheetId]);
+      if (Object.keys(remoteCursorsRef.current).length > 0) {
+        setCursorRerender((c) => c + 1);
+      }
+    }, [activePageId, canWrite, onSceneChange, sheetId]);
 
   const onTitleChange = useCallback(
     (nextTitle: string) => {
@@ -562,7 +755,34 @@ export default function ExcalidrawEditor({
   }, [sheetId]);
 
   useEffect(() => {
+    lastLiveFileIdsRef.current = new Set(Object.keys(docStateRef.current.files));
+    if (liveSceneDebounceRef.current) {
+      clearTimeout(liveSceneDebounceRef.current);
+      liveSceneDebounceRef.current = null;
+    }
+  }, [sheetId]);
+
+  useEffect(() => {
+    const id = setInterval(() => {
+      setRemoteCursors((prev) => {
+        const now = Date.now();
+        let changed = false;
+        const next = { ...prev };
+        for (const k of Object.keys(next)) {
+          if (now - (next[k]?.at ?? 0) > 2000) {
+            delete next[k];
+            changed = true;
+          }
+        }
+        return changed ? next : prev;
+      });
+    }, 800);
+    return () => clearInterval(id);
+  }, []);
+
+  useEffect(() => {
     let socket: Socket | null = null;
+    let onConnectHandler: (() => void) | null = null;
 
     const connect = async () => {
       try {
@@ -572,52 +792,199 @@ export default function ExcalidrawEditor({
         const options = { auth: { token, name: userName || "Guest", color: userColor, image: userImage || "" } };
         socket = url ? io(url, options) : io(options);
         socketRef.current = socket;
+        onConnectHandler = () => {
+          if (!socket) return;
+          const sid = socket.id ?? null;
+          setMySocketId(sid);
+          mySocketIdRef.current = sid;
+        };
+        onConnectHandler();
+        socket.on("connect", onConnectHandler);
         socket.emit("joinSheet", sheetId);
 
-        socket.on("sheet:snapshot", ({ snapshot, contentVersion: incomingVersion, fromUserId }: { snapshot?: unknown; contentVersion?: number; fromUserId?: string }) => {
-          if (userId && fromUserId === userId) return;
-          if (typeof incomingVersion !== "number" || incomingVersion <= versionRef.current) return;
-          const api = apiRef.current;
-          if (!api) return;
-          if (hasLocalUnsavedEditsRef.current) {
-            void flushSave(false);
-          }
-          const parsedDoc = parsePersistedDocument(snapshot);
-          const remotePage = parsedDoc.pages.find((page) => page.id === parsedDoc.activePageId) ?? parsedDoc.pages[0];
-          setDocumentState(parsedDoc);
-          docStateRef.current = parsedDoc;
-          setActivePageId(parsedDoc.activePageId);
-          applyScene(api, {
-            elements: remotePage?.elements ?? [],
-            appState: remotePage?.appState ?? {},
-            files: Object.values(parsedDoc.files),
-          });
-          versionRef.current = incomingVersion;
-          hasLocalUnsavedEditsRef.current = false;
-        });
-
-        socket.on("presence:list", (payload: { userId?: string; joined?: boolean; left?: boolean; name?: string; color?: string; image?: string }) => {
-          if (!payload.userId) return;
-          if (payload.left) {
-            setMembers((prev) => {
-              const next = { ...prev };
-              delete next[payload.userId!];
-              return next;
+        socket.on(
+          "sheet:snapshot",
+          ({
+            snapshot,
+            contentVersion: incomingVersion,
+            fromSocketId,
+          }: {
+            snapshot?: unknown;
+            contentVersion?: number;
+            fromSocketId?: string;
+          }) => {
+            if (fromSocketId && fromSocketId === mySocketIdRef.current) return;
+            if (typeof incomingVersion !== "number" || incomingVersion <= versionRef.current) return;
+            const api = apiRef.current;
+            if (!api) return;
+            if (hasLocalUnsavedEditsRef.current) {
+              void flushSave(false);
+            }
+            const parsedDoc = parsePersistedDocument(snapshot);
+            const remotePage = parsedDoc.pages.find((page) => page.id === parsedDoc.activePageId) ?? parsedDoc.pages[0];
+            setDocumentState(parsedDoc);
+            docStateRef.current = parsedDoc;
+            setActivePageId(parsedDoc.activePageId);
+            applyScene(api, {
+              elements: remotePage?.elements ?? [],
+              appState: remotePage?.appState ?? {},
+              files: Object.values(parsedDoc.files),
             });
-            return;
-          }
-          if (payload.joined) {
-            if (userId && payload.userId === userId) return;
-            setMembers((prev) => ({
+            versionRef.current = incomingVersion;
+            hasLocalUnsavedEditsRef.current = false;
+          },
+        );
+
+        socket.on(
+          "sheet:scene",
+          (payload: {
+            pageId?: string;
+            elements?: unknown;
+            files?: unknown;
+            fromSocketId?: string;
+          }) => {
+            if (!payload.fromSocketId || payload.fromSocketId === mySocketIdRef.current) return;
+            if (!Array.isArray(payload.elements)) return;
+            const pageId = payload.pageId;
+            const localEditAgeMs = Date.now() - lastLocalSceneEditAtRef.current;
+            // Guard against late/stale remote scene packets clobbering a shape immediately after local pointer release.
+            if (pageId && pageId === activePageIdRef.current && localEditAgeMs < 900) return;
+            const filesRec =
+              payload.files && typeof payload.files === "object"
+                ? (payload.files as Record<string, SceneFile>)
+                : undefined;
+            const fileArr = filesRec ? Object.values(filesRec) : [];
+            if (pageId && pageId === activePageIdRef.current) {
+              const api = apiRef.current;
+              if (!api) return;
+              const page = docStateRef.current.pages.find((p) => p.id === pageId);
+              applyScene(api, {
+                elements: payload.elements as Record<string, unknown>[],
+                appState: page?.appState ?? {},
+                files: fileArr,
+              });
+              setDocumentState((prev) => {
+                const mergedFiles = { ...prev.files, ...(filesRec ?? {}) };
+                const next: PersistedDocument = {
+                  ...prev,
+                  files: mergedFiles,
+                  pages: prev.pages.map((p) => (p.id === pageId ? { ...p, elements: payload.elements as Record<string, unknown>[] } : p)),
+                };
+                docStateRef.current = next;
+                return next;
+              });
+            } else if (pageId) {
+              setDocumentState((prev) => {
+                const mergedFiles = { ...prev.files, ...(filesRec ?? {}) };
+                const next: PersistedDocument = {
+                  ...prev,
+                  files: mergedFiles,
+                  pages: prev.pages.map((p) => (p.id === pageId ? { ...p, elements: payload.elements as Record<string, unknown>[] } : p)),
+                };
+                docStateRef.current = next;
+                return next;
+              });
+            }
+          },
+        );
+
+        socket.on(
+          "presence:list",
+          (payload: {
+            userId?: string;
+            joined?: boolean;
+            left?: boolean;
+            name?: string;
+            color?: string;
+            image?: string;
+            fromSocketId?: string;
+          }) => {
+            const sid = payload.fromSocketId;
+            if (payload.left) {
+              if (sid) {
+                setMembers((prev) => {
+                  const n = { ...prev };
+                  delete n[sid];
+                  return n;
+                });
+                setRemoteCursors((c) => {
+                  const x = { ...c };
+                  delete x[sid];
+                  return x;
+                });
+              } else if (payload.userId) {
+                setMembers((prev) => {
+                  const n = { ...prev };
+                  for (const k of Object.keys(n)) {
+                    if (n[k]?.userId === payload.userId) delete n[k];
+                  }
+                  return n;
+                });
+              }
+              return;
+            }
+            if (payload.joined && payload.userId && sid) {
+              if (sid === mySocketIdRef.current) return;
+              setMembers((prev) => ({
+                ...prev,
+                [sid]: {
+                  fromSocketId: sid,
+                  userId: payload.userId!,
+                  name: payload.name || "User",
+                  color: payload.color || "#0071E3",
+                  image: payload.image || undefined,
+                  editing: false,
+                },
+              }));
+            }
+          },
+        );
+
+        socket.on(
+          "sheet:peerEditing",
+          (payload: { fromSocketId?: string; userId?: string; editing?: boolean; name?: string; image?: string }) => {
+            if (!payload.fromSocketId || payload.fromSocketId === mySocketIdRef.current) return;
+            setMembers((prev) => {
+              const m = prev[payload.fromSocketId!];
+              if (!m) return prev;
+              return {
+                ...prev,
+                [payload.fromSocketId!]: { ...m, editing: !!payload.editing },
+              };
+            });
+          },
+        );
+
+        socket.on(
+          "presence:cursor",
+          (payload: {
+            fromSocketId?: string;
+            pageId?: string;
+            x?: number;
+            y?: number;
+            color?: string;
+            name?: string;
+          }) => {
+            if (!payload.fromSocketId || payload.fromSocketId === mySocketIdRef.current) return;
+            if (typeof payload.x !== "number" || typeof payload.y !== "number") return;
+            if (payload.pageId && payload.pageId !== activePageIdRef.current) return;
+            const rx = payload.x;
+            const ry = payload.y;
+            const fsid = payload.fromSocketId as string;
+            setRemoteCursors((prev) => ({
               ...prev,
-              [payload.userId!]: {
-                name: payload.name || "User",
+              [fsid]: {
+                x: rx,
+                y: ry,
+                pageId: payload.pageId,
                 color: payload.color || "#0071E3",
-                image: payload.image || undefined,
+                name: payload.name || "User",
+                at: Date.now(),
               },
             }));
-          }
-        });
+            setCursorRerender((c) => c + 1);
+          },
+        );
       } catch (err) {
         console.warn("Realtime unavailable", err);
       }
@@ -625,12 +992,22 @@ export default function ExcalidrawEditor({
 
     void connect();
     return () => {
+      if (liveSceneDebounceRef.current) {
+        clearTimeout(liveSceneDebounceRef.current);
+        liveSceneDebounceRef.current = null;
+      }
+      if (onConnectHandler && socket) {
+        socket.off("connect", onConnectHandler);
+      }
       socket?.emit("leaveSheet", sheetId);
       socket?.disconnect();
       socketRef.current = null;
+      setMySocketId(null);
+      mySocketIdRef.current = null;
       setMembers({});
+      setRemoteCursors({});
     };
-  }, [applyScene, flushSave, sheetId, userColor, userId, userImage, userName]);
+  }, [applyScene, flushSave, sheetId, userColor, userName, userImage]);
 
   useEffect(() => {
     const flushQueue = async () => {
@@ -925,12 +1302,37 @@ export default function ExcalidrawEditor({
         onChange={onImportPdf}
       />
 
-      <div className="absolute inset-0">
+      <div className="absolute inset-0" onPointerMove={onEditorPointerMove}>
         <ExcalidrawCanvas excalidrawAPI={handleApiReady} onChange={onExcalidrawChange} viewModeEnabled={!canWrite} />
+        {Object.keys(remoteCursors).length > 0 ? (
+          <div key={cursorRerender} className="pointer-events-none absolute inset-0 z-10" aria-hidden>
+            {Object.entries(remoteCursors).map(([fromId, c]) => {
+              if (c.pageId && c.pageId !== activePageId) return null;
+              const api = apiRef.current;
+              if (!api) return null;
+              const { x, y } = sceneCoordsToViewportCoords({ sceneX: c.x, sceneY: c.y }, pointerAppState(api));
+              return (
+                <div
+                  key={fromId}
+                  className="absolute flex flex-col items-start"
+                  style={{ transform: `translate(${x}px, ${y}px)`, marginTop: -8, marginLeft: 4 }}
+                >
+                  <span
+                    className="h-2.5 w-2.5 rounded-full border border-white/80 shadow"
+                    style={{ backgroundColor: c.color }}
+                  />
+                  <span className="mt-0.5 max-w-[9rem] truncate rounded bg-black/60 px-1.5 py-0.5 text-[10px] font-semibold text-white">
+                    {c.name}
+                  </span>
+                </div>
+              );
+            })}
+          </div>
+        ) : null}
       </div>
 
       <div className="pointer-events-none absolute inset-0 z-20">
-        <div className="pointer-events-auto absolute left-3 right-3 top-3 md:left-auto md:right-6 md:w-[26rem]">
+        <div className="pointer-events-auto absolute bottom-24 right-3 w-[min(23rem,calc(100vw-1.5rem))] md:bottom-28 md:right-6">
           <div className="glass-thick rounded-3xl p-3">
             <div className="flex items-center gap-2">
               <Link
@@ -956,9 +1358,107 @@ export default function ExcalidrawEditor({
                 <span className="hidden sm:inline">{saveStateMeta.label}</span>
               </span>
             </div>
+            {membersGrouped.length > 0 ? (
+              <div className="mt-2 flex max-w-full flex-wrap items-center gap-2 overflow-x-auto rounded-xl bg-black/5 px-2 py-1.5 dark:bg-white/10">
+                {membersGrouped.map(([uid, group]) => (
+                  <div key={uid} className="flex shrink-0 items-center gap-1.5 rounded-full bg-black/5 px-2 py-1 dark:bg-white/10">
+                    {group.length === 1 ? (
+                      <>
+                        <UserAvatar image={group[0]!.image} name={group[0]!.name} size="sm" />
+                        {group[0]!.editing ? <span className="h-2 w-2 animate-pulse rounded-full bg-emerald-500" title="Editing" /> : null}
+                        <span className="text-xs font-semibold">{group[0]!.name}</span>
+                      </>
+                    ) : (
+                      <>
+                        {group.map((m) => (
+                          <div key={m.fromSocketId} className="relative" title={m.name}>
+                            <UserAvatar image={m.image} name={m.name} size="sm" />
+                            {m.editing ? (
+                              <span className="absolute -right-0.5 -top-0.5 h-1.5 w-1.5 rounded-full border border-(--bg-canvas) bg-emerald-500" />
+                            ) : null}
+                          </div>
+                        ))}
+                        <span className="text-xs font-semibold">{group[0]!.name} ({group.length})</span>
+                      </>
+                    )}
+                  </div>
+                ))}
+              </div>
+            ) : null}
 
-            <div className="mt-2 flex items-center gap-1 border-t border-(--glass-border) pt-2">
-              <div className="mr-1 flex min-h-[38px] min-w-0 flex-1 items-center gap-1 rounded-xl bg-black/5 px-1 dark:bg-white/10">
+            <div className="mt-2 border-t border-(--glass-border) pt-2">
+              <div className="flex flex-wrap items-center gap-1.5">
+                <button
+                  type="button"
+                  disabled={!canWrite || busy !== null}
+                  onClick={() => pdfInputRef.current?.click()}
+                  className="inline-flex min-h-[34px] items-center justify-center gap-1.5 rounded-xl px-2 text-xs font-semibold hover:bg-black/5 disabled:opacity-50 dark:hover:bg-white/10"
+                >
+                  <FileDown className="h-3.5 w-3.5" />
+                  Import
+                </button>
+                <button
+                  type="button"
+                  disabled={busy !== null}
+                  onClick={() => setShowExportModeDialog(true)}
+                  className="inline-flex min-h-[34px] items-center justify-center gap-1.5 rounded-xl px-2 text-xs font-semibold hover:bg-black/5 disabled:opacity-50 dark:hover:bg-white/10"
+                >
+                  <FileUp className="h-3.5 w-3.5" />
+                  Export
+                </button>
+                <button
+                  type="button"
+                  onClick={onToggleExcalidrawTheme}
+                  className="inline-flex h-9 w-9 items-center justify-center rounded-xl hover:bg-black/5 dark:hover:bg-white/10"
+                  aria-label="Toggle Excalidraw theme"
+                >
+                  {excalidrawTheme === "dark" ? <Sun className="h-4 w-4" /> : <Moon className="h-4 w-4" />}
+                </button>
+                <button
+                  type="button"
+                  onClick={onResetView}
+                  className="inline-flex h-9 w-9 items-center justify-center rounded-xl hover:bg-black/5 dark:hover:bg-white/10"
+                  aria-label="Reset view"
+                >
+                  <RefreshCcw className="h-4 w-4" />
+                </button>
+                <Link
+                  href="/settings"
+                  className="inline-flex h-9 w-9 items-center justify-center rounded-xl hover:bg-black/5 dark:hover:bg-white/10"
+                  aria-label="Settings"
+                >
+                  <Settings className="h-4 w-4" />
+                </Link>
+                {showSharePanel ? (
+                  <button
+                    type="button"
+                    onClick={() => setShareOpen(true)}
+                    className="inline-flex h-9 w-9 items-center justify-center rounded-xl hover:bg-black/5 dark:hover:bg-white/10"
+                    aria-label="Share"
+                  >
+                    <Users className="h-4 w-4" />
+                  </button>
+                ) : null}
+                <button
+                  type="button"
+                  onClick={onDeletePage}
+                  disabled={!canWrite || documentState.pages.length <= 1}
+                  className="inline-flex h-9 w-9 items-center justify-center rounded-xl hover:bg-red-500/10 hover:text-red-500 disabled:opacity-50 dark:hover:bg-red-500/20"
+                  aria-label="Delete page"
+                >
+                  <Trash2 className="h-4 w-4" />
+                </button>
+                <button
+                  type="button"
+                  onClick={() => void onClearNote()}
+                  disabled={!canWrite || isClearing}
+                  className="inline-flex h-9 w-9 items-center justify-center rounded-xl hover:bg-red-500/10 hover:text-red-500 disabled:opacity-50 dark:hover:bg-red-500/20"
+                  aria-label="Clear note"
+                >
+                  <Trash2 className="h-4 w-4" />
+                </button>
+              </div>
+              <div className="mt-2 flex min-h-[38px] min-w-0 items-center gap-1 rounded-xl bg-black/5 px-1 dark:bg-white/10">
                 <button
                   type="button"
                   disabled={documentState.pages.length <= 1}
@@ -1000,91 +1500,9 @@ export default function ExcalidrawEditor({
                   <Plus className="h-4 w-4" />
                 </button>
               </div>
-              <button
-                type="button"
-                disabled={!canWrite || busy !== null}
-                onClick={() => pdfInputRef.current?.click()}
-                className="inline-flex min-h-[38px] flex-1 items-center justify-center gap-2 rounded-xl px-2 text-sm font-semibold hover:bg-black/5 disabled:opacity-50 dark:hover:bg-white/10"
-              >
-                <FileDown className="h-4 w-4" />
-                Import PDF
-              </button>
-              <button
-                type="button"
-                disabled={busy !== null}
-                onClick={() => setShowExportModeDialog(true)}
-                className="inline-flex min-h-[38px] flex-1 items-center justify-center gap-2 rounded-xl px-2 text-sm font-semibold hover:bg-black/5 disabled:opacity-50 dark:hover:bg-white/10"
-              >
-                <FileUp className="h-4 w-4" />
-                Export PDF
-              </button>
-              {showSharePanel ? (
-                <button
-                  type="button"
-                  onClick={() => setShareOpen(true)}
-                  className="inline-flex h-10 w-10 items-center justify-center rounded-xl hover:bg-black/5 dark:hover:bg-white/10"
-                  aria-label="Share"
-                >
-                  <Users className="h-4 w-4" />
-                </button>
-              ) : null}
-              <Link
-                href="/settings"
-                className="inline-flex h-10 w-10 items-center justify-center rounded-xl hover:bg-black/5 dark:hover:bg-white/10"
-                aria-label="Settings"
-              >
-                <Settings className="h-4 w-4" />
-              </Link>
-              <button
-                type="button"
-                onClick={onResetView}
-                className="inline-flex h-10 w-10 items-center justify-center rounded-xl hover:bg-black/5 dark:hover:bg-white/10"
-                aria-label="Reset view"
-              >
-                <RefreshCcw className="h-4 w-4" />
-              </button>
-              <button
-                type="button"
-                onClick={onToggleExcalidrawTheme}
-                className="inline-flex h-10 w-10 items-center justify-center rounded-xl hover:bg-black/5 dark:hover:bg-white/10"
-                aria-label="Toggle Excalidraw theme"
-              >
-                {excalidrawTheme === "dark" ? <Sun className="h-4 w-4" /> : <Moon className="h-4 w-4" />}
-              </button>
-              <button
-                type="button"
-                onClick={onDeletePage}
-                disabled={!canWrite || documentState.pages.length <= 1}
-                className="inline-flex h-10 w-10 items-center justify-center rounded-xl hover:bg-red-500/10 hover:text-red-500 disabled:opacity-50 dark:hover:bg-red-500/20"
-                aria-label="Delete page"
-              >
-                <Trash2 className="h-4 w-4" />
-              </button>
-              <button
-                type="button"
-                onClick={() => void onClearNote()}
-                disabled={!canWrite || isClearing}
-                className="inline-flex h-10 w-10 items-center justify-center rounded-xl hover:bg-red-500/10 hover:text-red-500 disabled:opacity-50 dark:hover:bg-red-500/20"
-                aria-label="Clear note"
-              >
-                <Trash2 className="h-4 w-4" />
-              </button>
             </div>
           </div>
         </div>
-
-        {visibleMembers.length > 0 ? (
-          <div className="pointer-events-auto absolute left-0 right-0 top-24 flex justify-center px-3">
-            <div className="glass-thick flex max-w-full items-center gap-2 overflow-x-auto rounded-full px-3 py-2">
-              {visibleMembers.map(([id, member]) => (
-                <div key={id} className="flex shrink-0 items-center gap-2 rounded-full bg-black/5 px-2 py-1 dark:bg-white/10">
-                  <UserAvatar image={member.image} name={member.name} size="sm" />
-                  <span className="text-xs font-semibold">{member.name}</span>
-                </div>
-              ))}
-            </div>
-          </div>
-        ) : null}
 
         {minimapView ? (
           <div className="pointer-events-none absolute bottom-24 left-4 hidden md:block">

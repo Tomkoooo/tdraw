@@ -12,6 +12,7 @@ import { dndIdNote, DND_ROOT_PERSONAL } from "./types";
 import type { SheetCard, LibraryNode, DriveSort, ViewMode, SharedSub, FolderTreeEntry, OrgRow } from "./types";
 import { toast } from "sonner";
 import type { DocEditActivity, OnlineMember } from "@/components/realtime/OrgWorkspaceRealtime";
+import type { DocPresenceMap } from "@/components/realtime/DocActivityRealtime";
 import LibraryShellView from "./LibraryShellView";
 
 type Ctx = { k: "sheet" | "folder" | "folderTree"; x: number; y: number; sheet?: SheetCard; folder?: FolderTreeEntry };
@@ -131,6 +132,7 @@ export default function LibraryShell(p: LibraryShellProps) {
   const [activeDrag, setActive] = useState<SheetCard | null>(null);
   const [, setOrgOnline] = useState<OnlineMember[]>([]);
   const [, setOrgAct] = useState<Record<string, DocEditActivity | null>>({});
+  const [docPresence, setDocPresence] = useState<DocPresenceMap>({});
 
   /* eslint-disable react-hooks/set-state-in-effect -- sync local state from server props and URL */
   useEffect(() => {
@@ -372,6 +374,8 @@ export default function LibraryShell(p: LibraryShellProps) {
       ctx={ctx}
       setOrgOnline={setOrgOnline}
       setOrgAct={setOrgAct}
+      docPresence={docPresence}
+      setDocPresence={setDocPresence}
     />
   );
 }
