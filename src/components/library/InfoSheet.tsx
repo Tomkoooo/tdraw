@@ -14,15 +14,7 @@ function fmtBytes(n: number) {
 
 export type SheetInfoPayload = Awaited<ReturnType<typeof getSheetInfo>>;
 
-export default function SheetInfoModal({
-  sheetId,
-  open,
-  onClose,
-}: {
-  sheetId: string | null;
-  open: boolean;
-  onClose: () => void;
-}) {
+export default function InfoSheet({ sheetId, open, onClose }: { sheetId: string | null; open: boolean; onClose: () => void }) {
   const [data, setData] = useState<SheetInfoPayload | null>(null);
   const [err, setErr] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
@@ -61,7 +53,7 @@ export default function SheetInfoModal({
   if (!open || !sheetId || typeof document === "undefined") return null;
 
   return createPortal(
-    <div className="fixed inset-0 z-[120] flex items-end justify-center p-0 sm:items-center sm:p-6">
+    <div className="fixed inset-0 z-[200] flex items-end justify-center p-0 sm:items-center sm:p-6">
       <button type="button" className="absolute inset-0 bg-black/55 backdrop-blur-md" onClick={onClose} aria-label="Close" />
       <div
         className="glass-menu relative flex max-h-[min(92vh,720px)] w-full max-w-lg flex-col overflow-hidden rounded-t-[1.75rem] shadow-2xl sm:rounded-[1.75rem]"
@@ -109,8 +101,7 @@ export default function SheetInfoModal({
                 <p className="rounded-2xl border border-[var(--input-border)] bg-[var(--input-bg)] px-4 py-3 text-gray-600 dark:text-gray-300">
                   {data.lastSavedBy ? (
                     <>
-                      <span className="font-semibold text-[var(--color-text)]">Last saved</span> by{" "}
-                      {data.lastSavedBy.name}
+                      <span className="font-semibold text-[var(--color-text)]">Last saved</span> by {data.lastSavedBy.name}
                       {data.updatedAt ? (
                         <>
                           {" "}
@@ -123,8 +114,8 @@ export default function SheetInfoModal({
                   )}
                 </p>
                 <p className="mt-2 text-xs text-gray-500 dark:text-gray-400">
-                  Live collaborators appear on the canvas while you are both connected. Detailed edit history is not stored
-                  server-side beyond last save.
+                  Live collaborators appear on the canvas while you are both connected. Detailed edit history is not stored server-side
+                  beyond last save.
                 </p>
               </section>
 

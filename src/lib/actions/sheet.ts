@@ -28,6 +28,29 @@ function approxStateBytes(canvasState: unknown): number {
   }
 }
 
+function collectReferencedFileIds(value: unknown): Set<string> {
+  const refs = new Set<string>();
+  const scanElements = (elements: unknown) => {
+    if (!Array.isArray(elements)) return;
+    for (const element of elements) {
+      if (!element || typeof element !== "object") continue;
+      const fileId = (element as { fileId?: unknown }).fileId;
+      if (typeof fileId === "string" && fileId.length > 0) refs.add(fileId);
+    }
+  };
+
+  if (!value || typeof value !== "object") return refs;
+  const root = value as { elements?: unknown; pages?: unknown };
+  scanElements(root.elements);
+  if (Array.isArray(root.pages)) {
+    for (const page of root.pages) {
+      if (!page || typeof page !== "object") continue;
+      scanElements((page as { elements?: unknown }).elements);
+    }
+  }
+  return refs;
+}
+
 function mapDriveSheet(sheet: {
   _id: unknown;
   title?: string;
@@ -131,6 +154,87 @@ export async function getMySheets() {
     .sort({ pinned: -1, sortIndex: 1, updatedAt: -1 })
     .lean();
 
+  return sheets.map(mapDriveSheet);
+}
+
+const ROOT_SHEET_FOLDER = { $or: [{ folderId: null }, { folderId: { $exists: false } }] };
+
+/** Personal drive root only — no folder; fixes duplicate listing when a note is filed. */
+export async function getRootDriveSheets() {
+  const session = await auth();
+  if (!session?.user?.id) throw new Error("Unauthorized");
+
+  await dbConnect();
+  const ownerId = new mongoose.Types.ObjectId(session.user.id);
+  const sheets = await Sheet.find({
+    $and: [
+      { userId: ownerId },
+      { $or: [{ organizationId: null }, { organizationId: { $exists: false } }] },
+      LIVE_SHEET,
+      ROOT_SHEET_FOLDER,
+    ],
+  })
+    .sort({ pinned: -1, sortIndex: 1, updatedAt: -1 })
+    .lean();
+
+  return sheets.map(mapDriveSheet);
+}
+
+/** Org root only — notes not in a folder. */
+export async function getRootOrgSheets(organizationId: string) {
+  const session = await auth();
+  if (!session?.user?.id) throw new Error("Unauthorized");
+  await dbConnect();
+  await requireOrgMember(session.user.id, organizationId);
+
+  const orgOid = new mongoose.Types.ObjectId(organizationId);
+  const sheets = await Sheet.find({
+    $and: [
+      { organizationId: orgOid },
+      ROOT_SHEET_FOLDER,
+      LIVE_SHEET,
+    ],
+  })
+    .sort({ pinned: -1, sortIndex: 1, updatedAt: -1 })
+    .lean();
+
+  return sheets.map(mapDriveSheet);
+}
+
+export async function getFolderSheets(folderId: string) {
+  const session = await auth();
+  if (!session?.user?.id) throw new Error("Unauthorized");
+  await dbConnect();
+
+  const f = await Folder.findOne({ _id: folderId, ...LIVE_FOLDER }).lean();
+  if (!f) throw new Error("Folder not found");
+  if (f.ownerUserId) {
+    if (String(f.ownerUserId) !== session.user.id) throw new Error("Forbidden");
+  } else if (f.organizationId) {
+    await requireOrgMember(session.user.id, String(f.organizationId));
+  } else {
+    throw new Error("Forbidden");
+  }
+
+  const folderOid = new mongoose.Types.ObjectId(folderId);
+  if (f.organizationId) {
+    const sheets = await Sheet.find({
+      $and: [{ organizationId: f.organizationId }, { folderId: folderOid }, LIVE_SHEET],
+    })
+      .sort({ pinned: -1, sortIndex: 1, updatedAt: -1 })
+      .lean();
+    return sheets.map(mapDriveSheet);
+  }
+  const sheets = await Sheet.find({
+    $and: [
+      { userId: new mongoose.Types.ObjectId(session.user.id) },
+      { $or: [{ organizationId: null }, { organizationId: { $exists: false } }] },
+      { folderId: folderOid },
+      LIVE_SHEET,
+    ],
+  })
+    .sort({ pinned: -1, sortIndex: 1, updatedAt: -1 })
+    .lean();
   return sheets.map(mapDriveSheet);
 }
 
@@ -442,11 +546,30 @@ export async function saveSheetState(
     const existing = (current as { canvasState?: { files?: unknown } }).canvasState;
     const incomingFileCount =
       incoming.files && typeof incoming.files === "object" ? Object.keys(incoming.files as Record<string, unknown>).length : 0;
-    if (incomingFileCount === 0 && existing?.files && typeof existing.files === "object") {
-      nextCanvasState = {
-        ...(canvasState as Record<string, unknown>),
-        files: existing.files,
-      };
+    const referencedBeforeMerge = collectReferencedFileIds(canvasState);
+    const existingFiles = existing?.files && typeof existing.files === "object" ? (existing.files as Record<string, unknown>) : null;
+    if (incomingFileCount === 0 && existingFiles) {
+      const refsCoveredByExisting = [...referencedBeforeMerge].every((id) => id in existingFiles);
+      if (refsCoveredByExisting) {
+        nextCanvasState = {
+          ...(canvasState as Record<string, unknown>),
+          files: existingFiles,
+        };
+      }
+    }
+  }
+  if (nextCanvasState && typeof nextCanvasState === "object") {
+    const referenced = collectReferencedFileIds(nextCanvasState);
+    const files = (nextCanvasState as { files?: unknown }).files;
+    if (referenced.size > 0 && (!files || typeof files !== "object")) {
+      throw new Error("Canvas state includes image references but no files payload");
+    }
+    if (referenced.size > 0 && files && typeof files === "object") {
+      for (const id of referenced) {
+        if (!(id in (files as Record<string, unknown>))) {
+          throw new Error("Canvas state includes orphaned image references");
+        }
+      }
     }
   }
 
@@ -487,6 +610,48 @@ export async function moveSheetToFolder(sheetId: string, folderId: string | null
     { folderId: folderId ? new mongoose.Types.ObjectId(folderId) : undefined }
   );
   revalidatePath("/dashboard");
+}
+
+export async function bulkMoveSheets(sheetIds: string[], folderId: string | null) {
+  const results: { id: string; ok: true }[] = [];
+  const failures: { id: string; error: string }[] = [];
+  for (const id of sheetIds) {
+    try {
+      await moveSheetToFolder(id, folderId);
+      results.push({ id, ok: true });
+    } catch (e) {
+      failures.push({ id, error: e instanceof Error ? e.message : "Unknown error" });
+    }
+  }
+  return { moved: results.length, failed: failures };
+}
+
+export async function bulkSetSheetPinned(sheetIds: string[], pinned: boolean) {
+  const results: { id: string; ok: true }[] = [];
+  const failures: { id: string; error: string }[] = [];
+  for (const id of sheetIds) {
+    try {
+      await setSheetPinned(id, pinned);
+      results.push({ id, ok: true });
+    } catch (e) {
+      failures.push({ id, error: e instanceof Error ? e.message : "Unknown error" });
+    }
+  }
+  return { updated: results.length, failed: failures };
+}
+
+export async function bulkMoveSheetsToTrash(sheetIds: string[]) {
+  const results: { id: string; ok: true }[] = [];
+  const failures: { id: string; error: string }[] = [];
+  for (const id of sheetIds) {
+    try {
+      await moveSheetToTrash(id);
+      results.push({ id, ok: true });
+    } catch (e) {
+      failures.push({ id, error: e instanceof Error ? e.message : "Unknown error" });
+    }
+  }
+  return { trashed: results.length, failed: failures };
 }
 
 type PopUser = { _id: mongoose.Types.ObjectId; name?: string; email?: string; image?: string };

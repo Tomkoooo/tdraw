@@ -9,10 +9,12 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { toast } from "sonner";
 import {
   ChevronLeft,
+  ChevronRight,
   Moon,
   FileDown,
   FileUp,
   Loader2,
+  Plus,
   RefreshCcw,
   Settings,
   Sun,
@@ -22,8 +24,8 @@ import {
 
 import { saveSheetState, updateSheetTitle } from "@/lib/actions/sheet";
 import { getRealtimeToken } from "@/lib/actions/socketToken";
-import { exportEditorToPdf } from "@/lib/pdf/exportEditorToPdf";
-import { importPdfToEditor } from "@/lib/pdf/importPdfToEditor";
+import { exportEditorToPdf, exportPagesToPdf } from "@/lib/pdf/exportEditorToPdf";
+import { importPdfToEditor, renderPdfToPages } from "@/lib/pdf/importPdfToEditor";
 import SheetVisitRecorder from "@/components/SheetVisitRecorder";
 import UserAvatar from "@/components/UserAvatar";
 import SheetShareForm from "@/components/SheetShareForm";
@@ -55,6 +57,8 @@ interface ExcalidrawEditorProps {
 }
 
 type BusyKind = "import" | "export";
+type PdfImportMode = "perPage" | "stackCurrent" | "stackNew";
+type PdfExportMode = "current" | "all";
 type SceneFile = {
   id: string;
   dataURL: string;
@@ -67,6 +71,18 @@ type PersistedScene = {
   appState: Record<string, unknown>;
   files: Record<string, SceneFile>;
 };
+type PersistedPage = {
+  id: string;
+  name: string;
+  elements: Record<string, unknown>[];
+  appState: Record<string, unknown>;
+};
+type PersistedDocument = {
+  version: 2;
+  activePageId: string;
+  pages: PersistedPage[];
+  files: Record<string, SceneFile>;
+};
 type SaveState = "unsaved" | "offlineQueued" | "saving" | "saved";
 type MinimapState = {
   scene: { minX: number; minY: number; maxX: number; maxY: number } | null;
@@ -74,6 +90,8 @@ type MinimapState = {
 };
 
 const queueKey = (sheetId: string) => `excalidraw-save-queue-${sheetId}`;
+const cachedDocKey = (sheetId: string) => `excalidraw-cached-doc-${sheetId}`;
+const DEFAULT_PAGE_NAME = "Page 1";
 
 function isObj(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null;
@@ -107,6 +125,60 @@ function parseScene(raw: unknown): { elements: Record<string, unknown>[]; files:
     );
   });
   return { elements, files };
+}
+
+function createPageId() {
+  return `page-${Date.now()}-${Math.floor(Math.random() * 1e6)}`;
+}
+
+function createDefaultPage(overrides?: Partial<PersistedPage>): PersistedPage {
+  return {
+    id: overrides?.id ?? createPageId(),
+    name: overrides?.name ?? DEFAULT_PAGE_NAME,
+    elements: overrides?.elements ?? [],
+    appState: overrides?.appState ?? {},
+  };
+}
+
+function parsePersistedDocument(raw: unknown): PersistedDocument {
+  const legacy = parseScene(raw);
+  const obj = isObj(raw) ? raw : null;
+  const files = isObj(obj?.files) ? (obj?.files as Record<string, SceneFile>) : {};
+
+  if (obj?.version === 2 && Array.isArray(obj.pages)) {
+    const pages = obj.pages
+      .map((page): PersistedPage | null => {
+        if (!isObj(page)) return null;
+        const id = typeof page.id === "string" && page.id.length > 0 ? page.id : createPageId();
+        const name = typeof page.name === "string" && page.name.trim().length > 0 ? page.name.trim() : "Page";
+        const elements = Array.isArray(page.elements) ? page.elements.filter(isSceneElement) : [];
+        const appState = isObj(page.appState) ? page.appState : {};
+        return { id, name, elements, appState };
+      })
+      .filter((page): page is PersistedPage => Boolean(page));
+    const ensuredPages = pages.length > 0 ? pages : [createDefaultPage()];
+    const activePageId =
+      typeof obj.activePageId === "string" && ensuredPages.some((page) => page.id === obj.activePageId)
+        ? obj.activePageId
+        : ensuredPages[0].id;
+    return {
+      version: 2,
+      activePageId,
+      pages: ensuredPages,
+      files,
+    };
+  }
+
+  const defaultPage = createDefaultPage({
+    elements: legacy.elements,
+    appState: {},
+  });
+  return {
+    version: 2,
+    activePageId: defaultPage.id,
+    pages: [defaultPage],
+    files,
+  };
 }
 
 function toFinite(value: unknown, fallback = 0): number {
@@ -173,6 +245,11 @@ export default function ExcalidrawEditor({
   const [title, setTitle] = useState(initialTitle);
   const [busy, setBusy] = useState<BusyKind | null>(null);
   const [shareOpen, setShareOpen] = useState(false);
+  const [showImportModeDialog, setShowImportModeDialog] = useState(false);
+  const [showExportModeDialog, setShowExportModeDialog] = useState(false);
+  const [pendingPdfFile, setPendingPdfFile] = useState<File | null>(null);
+  const [documentState, setDocumentState] = useState<PersistedDocument>(() => parsePersistedDocument(initialData));
+  const [activePageId, setActivePageId] = useState(() => parsePersistedDocument(initialData).activePageId);
   const [isClearing, setIsClearing] = useState(false);
   const [members, setMembers] = useState<Record<string, { name: string; color: string; image?: string }>>({});
   const [excalidrawTheme, setExcalidrawTheme] = useState<"light" | "dark">("light");
@@ -193,6 +270,7 @@ export default function ExcalidrawEditor({
   const ignoreAutosaveUntilRef = useRef(0);
   const sceneFingerprintRef = useRef("");
   const versionRef = useRef(Number.isFinite(contentVersion) ? contentVersion : 0);
+  const docStateRef = useRef<PersistedDocument>(parsePersistedDocument(initialData));
 
   const userColor = useMemo(() => {
     const palette = ["#0071E3", "#34C759", "#FF9500", "#AF52DE", "#FF2D55"];
@@ -205,9 +283,13 @@ export default function ExcalidrawEditor({
     () => Object.entries(members).filter(([id]) => !userId || id !== userId),
     [members, userId],
   );
+  const activePage = useMemo(
+    () => documentState.pages.find((page) => page.id === activePageId) ?? documentState.pages[0],
+    [activePageId, documentState.pages],
+  );
 
   const applyScene = useCallback(
-    (api: ExcalidrawImperativeApiLike, scene: { elements: Record<string, unknown>[]; files: SceneFile[] }) => {
+    (api: ExcalidrawImperativeApiLike, scene: { elements: Record<string, unknown>[]; files: SceneFile[]; appState?: Record<string, unknown> }) => {
       blockSyncRef.current = true;
       ignoreAutosaveUntilRef.current = Date.now() + 700;
       try {
@@ -217,6 +299,7 @@ export default function ExcalidrawEditor({
         api.updateScene({
           elements: scene.elements as unknown as Parameters<ExcalidrawImperativeApiLike["updateScene"]>[0]["elements"],
           appState: {
+            ...(scene.appState ?? {}),
             viewModeEnabled: !canWrite,
             zenModeEnabled: false,
             zoom: { value: 1 },
@@ -226,7 +309,7 @@ export default function ExcalidrawEditor({
           } as Parameters<ExcalidrawImperativeApiLike["updateScene"]>[0]["appState"],
         });
         const currentTheme = api.getAppState().theme === "dark" ? "dark" : "light";
-        setExcalidrawTheme(currentTheme);
+        setExcalidrawTheme((t) => (t === currentTheme ? t : currentTheme));
       } finally {
         blockSyncRef.current = false;
       }
@@ -234,23 +317,45 @@ export default function ExcalidrawEditor({
     [canWrite],
   );
 
-  const createSnapshot = useCallback((api: ExcalidrawImperativeApiLike, includeFiles: boolean): PersistedScene => {
+  const createSnapshot = useCallback((api: ExcalidrawImperativeApiLike): PersistedScene => {
+    const currentFiles = api.getFiles() as unknown as Record<string, SceneFile>;
     return {
       elements: api.getSceneElements() as unknown as Record<string, unknown>[],
       appState: {
         viewBackgroundColor: api.getAppState().viewBackgroundColor,
         theme: api.getAppState().theme,
       },
-      files: includeFiles ? (api.getFiles() as unknown as Record<string, SceneFile>) : {},
+      files: currentFiles,
     };
   }, []);
 
+  const createDocumentSnapshot = useCallback((api: ExcalidrawImperativeApiLike): PersistedDocument => {
+    const pageSnapshot = createSnapshot(api);
+    const baseDoc = docStateRef.current;
+    const nextPages = baseDoc.pages.map((page) =>
+      page.id === activePageId
+        ? {
+            ...page,
+            elements: pageSnapshot.elements,
+            appState: pageSnapshot.appState,
+          }
+        : page,
+    );
+    const mergedFiles = { ...baseDoc.files, ...pageSnapshot.files };
+    return {
+      version: 2,
+      activePageId,
+      pages: nextPages,
+      files: mergedFiles,
+    };
+  }, [activePageId, createSnapshot]);
+
   const flushSave = useCallback(
-    async (forceOverwrite = false, includeFiles = false) => {
+    async (forceOverwrite = false) => {
       const api = apiRef.current;
       if (!api || !canWrite || blockSyncRef.current) return;
 
-      const snapshot = createSnapshot(api, includeFiles);
+      const snapshot = createDocumentSnapshot(api);
       setSaveState("saving");
       try {
         const res = await saveSheetState(
@@ -271,6 +376,9 @@ export default function ExcalidrawEditor({
         if ("contentVersion" in res && typeof res.contentVersion === "number") {
           versionRef.current = res.contentVersion;
         }
+        setDocumentState(snapshot);
+        docStateRef.current = snapshot;
+        await localforage.setItem(cachedDocKey(sheetId), snapshot);
         sceneFingerprintRef.current = buildSceneFingerprint(api.getSceneElements() as unknown as Record<string, unknown>[]);
         hasLocalUnsavedEditsRef.current = false;
         setSaveState("saved");
@@ -289,7 +397,7 @@ export default function ExcalidrawEditor({
         }
       }
     },
-    [canWrite, createSnapshot, router, sheetId],
+    [canWrite, createDocumentSnapshot, router, sheetId],
   );
 
   useEffect(() => {
@@ -306,8 +414,7 @@ export default function ExcalidrawEditor({
     sceneFingerprintRef.current = "";
     versionRef.current = Number.isFinite(contentVersion) ? contentVersion : 0;
     hasLocalUnsavedEditsRef.current = false;
-    setSaveState("saved");
-  }, [sheetId, contentVersion]);
+  }, [contentVersion, sheetId]);
 
   useEffect(() => {
     if (typeof navigator === "undefined") return;
@@ -327,7 +434,13 @@ export default function ExcalidrawEditor({
       if (!hasAppliedInitialRef.current) {
         requestAnimationFrame(() => {
           if (!mountedRef.current || !apiRef.current || hasAppliedInitialRef.current) return;
-          applyScene(apiRef.current, parseScene(initialData));
+          const parsedDoc = docStateRef.current;
+          const page = parsedDoc.pages.find((item) => item.id === parsedDoc.activePageId) ?? parsedDoc.pages[0];
+          applyScene(apiRef.current, {
+            elements: page?.elements ?? [],
+            appState: page?.appState ?? {},
+            files: Object.values(parsedDoc.files),
+          });
           sceneFingerprintRef.current = buildSceneFingerprint(
             apiRef.current.getSceneElements() as unknown as Record<string, unknown>[],
           );
@@ -338,7 +451,7 @@ export default function ExcalidrawEditor({
         });
       }
     },
-    [applyScene, initialData],
+    [applyScene],
   );
 
   const onSceneChange = useCallback(() => {
@@ -351,7 +464,7 @@ export default function ExcalidrawEditor({
     }, 1200);
   }, [canWrite, flushSave]);
 
-  const onExcalidrawChange = useCallback((elements: readonly unknown[], appState: unknown, _files: unknown) => {
+  const onExcalidrawChange = useCallback((elements: readonly unknown[], appState: unknown) => {
       const typedElements = elements.filter(isSceneElement);
       const sceneBounds = getElementBounds(typedElements);
       const appStateObj = isObj(appState) ? appState : {};
@@ -367,6 +480,29 @@ export default function ExcalidrawEditor({
         viewport: { x: viewportX, y: viewportY, width: viewportWidth, height: viewportHeight },
       });
 
+      const appStateForPage = {
+        viewBackgroundColor: typeof appStateObj.viewBackgroundColor === "string" ? appStateObj.viewBackgroundColor : undefined,
+        theme: appStateObj.theme === "dark" ? "dark" : "light",
+      };
+      setDocumentState((prev) => {
+        const updated = {
+          ...prev,
+          activePageId,
+          pages: prev.pages.map((page) =>
+            page.id === activePageId
+              ? {
+                  ...page,
+                  elements: typedElements,
+                  appState: appStateForPage,
+                }
+              : page,
+          ),
+        };
+        docStateRef.current = updated;
+        void localforage.setItem(cachedDocKey(sheetId), updated);
+        return updated;
+      });
+
       const nextFingerprint = buildSceneFingerprint(typedElements);
       if (!autosaveArmedRef.current) {
         sceneFingerprintRef.current = nextFingerprint;
@@ -379,7 +515,7 @@ export default function ExcalidrawEditor({
       if (nextFingerprint === sceneFingerprintRef.current) return;
       sceneFingerprintRef.current = nextFingerprint;
       onSceneChange();
-    }, [onSceneChange]);
+    }, [activePageId, onSceneChange, sheetId]);
 
   const onTitleChange = useCallback(
     (nextTitle: string) => {
@@ -396,6 +532,34 @@ export default function ExcalidrawEditor({
     },
     [canTitle, sheetId],
   );
+
+  /* Only when switching pages — do not depend on activePage/documentState or every scene edit re-applies and loops with onChange. */
+  useEffect(() => {
+    const api = apiRef.current;
+    if (!api || !hasAppliedInitialRef.current) return;
+    const doc = docStateRef.current;
+    const page = doc.pages.find((p) => p.id === activePageId) ?? doc.pages[0];
+    if (!page) return;
+    applyScene(api, {
+      elements: page.elements,
+      appState: page.appState,
+      files: Object.values(doc.files),
+    });
+    sceneFingerprintRef.current = buildSceneFingerprint(page.elements);
+  }, [activePageId, applyScene]);
+
+  useEffect(() => {
+    const loadCachedDoc = async () => {
+      if (typeof navigator === "undefined" || navigator.onLine) return;
+      const cached = await localforage.getItem<unknown>(cachedDocKey(sheetId));
+      if (!cached) return;
+      const parsed = parsePersistedDocument(cached);
+      setDocumentState(parsed);
+      docStateRef.current = parsed;
+      setActivePageId(parsed.activePageId);
+    };
+    void loadCachedDoc();
+  }, [sheetId]);
 
   useEffect(() => {
     let socket: Socket | null = null;
@@ -418,7 +582,16 @@ export default function ExcalidrawEditor({
           if (hasLocalUnsavedEditsRef.current) {
             void flushSave(false);
           }
-          applyScene(api, parseScene(snapshot));
+          const parsedDoc = parsePersistedDocument(snapshot);
+          const remotePage = parsedDoc.pages.find((page) => page.id === parsedDoc.activePageId) ?? parsedDoc.pages[0];
+          setDocumentState(parsedDoc);
+          docStateRef.current = parsedDoc;
+          setActivePageId(parsedDoc.activePageId);
+          applyScene(api, {
+            elements: remotePage?.elements ?? [],
+            appState: remotePage?.appState ?? {},
+            files: Object.values(parsedDoc.files),
+          });
           versionRef.current = incomingVersion;
           hasLocalUnsavedEditsRef.current = false;
         });
@@ -463,7 +636,7 @@ export default function ExcalidrawEditor({
     const flushQueue = async () => {
       const queue = ((await localforage.getItem<unknown[]>(queueKey(sheetId))) ?? []) as unknown[];
       if (!queue.length || !canWrite) return;
-      const item = queue[0] as { snapshot?: PersistedScene; v?: number } | undefined;
+      const item = queue[0] as { snapshot?: PersistedDocument; v?: number } | undefined;
       if (!item?.snapshot) return;
       try {
         const res = await saveSheetState(sheetId, item.snapshot, undefined, item.v ?? versionRef.current);
@@ -494,11 +667,69 @@ export default function ExcalidrawEditor({
     async (event: React.ChangeEvent<HTMLInputElement>) => {
       const file = event.target.files?.[0];
       event.target.value = "";
-      if (!file || !apiRef.current || !canWrite) return;
+      if (!file || !canWrite) return;
+      setPendingPdfFile(file);
+      setShowImportModeDialog(true);
+    },
+    [canWrite],
+  );
+
+  const runPdfImport = useCallback(
+    async (mode: PdfImportMode) => {
+      const file = pendingPdfFile;
+      const api = apiRef.current;
+      if (!file || !api || !canWrite || !activePage) return;
+      setShowImportModeDialog(false);
+      setPendingPdfFile(null);
       setBusy("import");
       try {
-        await importPdfToEditor(apiRef.current as unknown as Parameters<typeof importPdfToEditor>[0], file);
-        await flushSave(false, true);
+        if (mode === "stackCurrent") {
+          await importPdfToEditor(api as unknown as Parameters<typeof importPdfToEditor>[0], file);
+          await new Promise<void>((r) => requestAnimationFrame(() => requestAnimationFrame(() => r())));
+        } else {
+          const importedPages = await renderPdfToPages(file);
+          const filesById = Object.fromEntries(importedPages.map((page) => [page.file.id, page.file]));
+          if (mode === "perPage") {
+            const addedPages: PersistedPage[] = importedPages.map((pdfPage, index) => ({
+              id: createPageId(),
+              name: `${file.name.replace(/\.pdf$/i, "") || "PDF"} ${index + 1}`,
+              elements: [{ ...pdfPage.imageElement }],
+              appState: {},
+            }));
+            const nextDoc: PersistedDocument = {
+              ...docStateRef.current,
+              pages: [...docStateRef.current.pages, ...addedPages],
+              files: { ...docStateRef.current.files, ...filesById },
+              activePageId: addedPages[0]?.id ?? activePageId,
+            };
+            docStateRef.current = nextDoc;
+            setDocumentState(nextDoc);
+            setActivePageId(nextDoc.activePageId);
+          } else {
+            let y = 0;
+            const stacked = importedPages.map((page) => {
+              const element = { ...page.imageElement, y };
+              y += page.imageElement.height + 50;
+              return element;
+            });
+            const newPage: PersistedPage = {
+              id: createPageId(),
+              name: `${file.name.replace(/\.pdf$/i, "") || "PDF"} page`,
+              elements: stacked,
+              appState: {},
+            };
+            const nextDoc: PersistedDocument = {
+              ...docStateRef.current,
+              pages: [...docStateRef.current.pages, newPage],
+              files: { ...docStateRef.current.files, ...filesById },
+              activePageId: newPage.id,
+            };
+            docStateRef.current = nextDoc;
+            setDocumentState(nextDoc);
+            setActivePageId(newPage.id);
+          }
+        }
+        await flushSave(false);
       } catch (err) {
         console.error(err);
         toast.error("PDF import failed.");
@@ -506,21 +737,38 @@ export default function ExcalidrawEditor({
         setBusy(null);
       }
     },
-    [canWrite, flushSave],
+    [activePage, activePageId, canWrite, flushSave, pendingPdfFile],
   );
 
-  const onExportPdf = useCallback(async () => {
-    if (!apiRef.current) return;
+  const runPdfExport = useCallback(async (mode: PdfExportMode) => {
+    if (!apiRef.current || !activePage) return;
+    setShowExportModeDialog(false);
     setBusy("export");
     try {
-      await exportEditorToPdf(apiRef.current as unknown as Parameters<typeof exportEditorToPdf>[0], title || "note");
+      if (mode === "all") {
+        const pagesPayload = documentState.pages.map((page) => ({
+          elements: page.elements,
+          appState: page.appState,
+          files: documentState.files,
+        }));
+        await exportPagesToPdf(pagesPayload, title || "note");
+      } else {
+        await exportEditorToPdf(
+          {
+            elements: activePage.elements,
+            appState: activePage.appState,
+            files: documentState.files,
+          },
+          title || "note",
+        );
+      }
     } catch (err) {
       console.error(err);
       toast.error("PDF export failed.");
     } finally {
       setBusy(null);
     }
-  }, [title]);
+  }, [activePage, documentState.files, documentState.pages, title]);
 
   const onResetView = useCallback(() => {
     const api = apiRef.current;
@@ -553,20 +801,72 @@ export default function ExcalidrawEditor({
 
   const onClearNote = useCallback(async () => {
     const api = apiRef.current;
-    if (!api || !canWrite || isClearing) return;
-    if (!window.confirm("Reset this note to a blank canvas?")) return;
+    if (!api || !canWrite || isClearing || !activePage) return;
+    if (!window.confirm(`Reset "${activePage.name}" to a blank canvas?`)) return;
     setIsClearing(true);
     try {
-      applyScene(api, { elements: [], files: [] });
-      await flushSave(true, true);
-      toast.success("Note reset.");
+      const nextDoc: PersistedDocument = {
+        ...docStateRef.current,
+        pages: docStateRef.current.pages.map((page) =>
+          page.id === activePage.id ? { ...page, elements: [], appState: {} } : page,
+        ),
+      };
+      docStateRef.current = nextDoc;
+      setDocumentState(nextDoc);
+      applyScene(api, { elements: [], appState: {}, files: Object.values(nextDoc.files) });
+      await flushSave(true);
+      toast.success("Page reset.");
     } catch (err) {
       console.error(err);
       toast.error("Couldn’t reset note.");
     } finally {
       setIsClearing(false);
     }
-  }, [applyScene, canWrite, flushSave, isClearing]);
+  }, [activePage, applyScene, canWrite, flushSave, isClearing]);
+
+  const onAddPage = useCallback(() => {
+    if (!canWrite) return;
+    const newPage = createDefaultPage({ name: `Page ${documentState.pages.length + 1}` });
+    const nextDoc: PersistedDocument = {
+      ...documentState,
+      pages: [...documentState.pages, newPage],
+      activePageId: newPage.id,
+    };
+    docStateRef.current = nextDoc;
+    setDocumentState(nextDoc);
+    setActivePageId(newPage.id);
+  }, [canWrite, documentState]);
+
+  const onRenamePage = useCallback(() => {
+    if (!activePage || !canWrite) return;
+    const nextName = window.prompt("Rename page", activePage.name)?.trim();
+    if (!nextName) return;
+    const nextDoc: PersistedDocument = {
+      ...documentState,
+      pages: documentState.pages.map((page) => (page.id === activePage.id ? { ...page, name: nextName } : page)),
+    };
+    docStateRef.current = nextDoc;
+    setDocumentState(nextDoc);
+  }, [activePage, canWrite, documentState]);
+
+  const onDeletePage = useCallback(() => {
+    if (!activePage || !canWrite) return;
+    if (documentState.pages.length <= 1) {
+      toast.warning("At least one page must remain.");
+      return;
+    }
+    if (!window.confirm(`Delete "${activePage.name}"?`)) return;
+    const remaining = documentState.pages.filter((page) => page.id !== activePage.id);
+    const nextActive = remaining[Math.max(0, documentState.pages.findIndex((p) => p.id === activePage.id) - 1)];
+    const nextDoc: PersistedDocument = {
+      ...documentState,
+      pages: remaining,
+      activePageId: nextActive.id,
+    };
+    docStateRef.current = nextDoc;
+    setDocumentState(nextDoc);
+    setActivePageId(nextActive.id);
+  }, [activePage, canWrite, documentState]);
 
   const busyLabel = busy === "import" ? "Importing PDF..." : busy === "export" ? "Exporting PDF..." : "";
   const saveStateMeta = useMemo(() => {
@@ -658,6 +958,48 @@ export default function ExcalidrawEditor({
             </div>
 
             <div className="mt-2 flex items-center gap-1 border-t border-(--glass-border) pt-2">
+              <div className="mr-1 flex min-h-[38px] min-w-0 flex-1 items-center gap-1 rounded-xl bg-black/5 px-1 dark:bg-white/10">
+                <button
+                  type="button"
+                  disabled={documentState.pages.length <= 1}
+                  onClick={() => {
+                    const idx = documentState.pages.findIndex((page) => page.id === activePageId);
+                    if (idx > 0) setActivePageId(documentState.pages[idx - 1].id);
+                  }}
+                  className="inline-flex h-8 w-8 items-center justify-center rounded-lg hover:bg-black/10 disabled:opacity-40 dark:hover:bg-white/10"
+                  aria-label="Previous page"
+                >
+                  <ChevronLeft className="h-4 w-4" />
+                </button>
+                <button
+                  type="button"
+                  onClick={onRenamePage}
+                  className="min-w-0 flex-1 truncate rounded-lg px-2 py-1 text-left text-xs font-semibold hover:bg-black/10 dark:hover:bg-white/10"
+                  title={activePage?.name ?? DEFAULT_PAGE_NAME}
+                >
+                  {activePage?.name ?? DEFAULT_PAGE_NAME}
+                </button>
+                <button
+                  type="button"
+                  disabled={documentState.pages.length <= 1}
+                  onClick={() => {
+                    const idx = documentState.pages.findIndex((page) => page.id === activePageId);
+                    if (idx >= 0 && idx < documentState.pages.length - 1) setActivePageId(documentState.pages[idx + 1].id);
+                  }}
+                  className="inline-flex h-8 w-8 items-center justify-center rounded-lg hover:bg-black/10 disabled:opacity-40 dark:hover:bg-white/10"
+                  aria-label="Next page"
+                >
+                  <ChevronRight className="h-4 w-4" />
+                </button>
+                <button
+                  type="button"
+                  onClick={onAddPage}
+                  className="inline-flex h-8 w-8 items-center justify-center rounded-lg hover:bg-black/10 dark:hover:bg-white/10"
+                  aria-label="Add page"
+                >
+                  <Plus className="h-4 w-4" />
+                </button>
+              </div>
               <button
                 type="button"
                 disabled={!canWrite || busy !== null}
@@ -670,7 +1012,7 @@ export default function ExcalidrawEditor({
               <button
                 type="button"
                 disabled={busy !== null}
-                onClick={() => void onExportPdf()}
+                onClick={() => setShowExportModeDialog(true)}
                 className="inline-flex min-h-[38px] flex-1 items-center justify-center gap-2 rounded-xl px-2 text-sm font-semibold hover:bg-black/5 disabled:opacity-50 dark:hover:bg-white/10"
               >
                 <FileUp className="h-4 w-4" />
@@ -708,6 +1050,15 @@ export default function ExcalidrawEditor({
                 aria-label="Toggle Excalidraw theme"
               >
                 {excalidrawTheme === "dark" ? <Sun className="h-4 w-4" /> : <Moon className="h-4 w-4" />}
+              </button>
+              <button
+                type="button"
+                onClick={onDeletePage}
+                disabled={!canWrite || documentState.pages.length <= 1}
+                className="inline-flex h-10 w-10 items-center justify-center rounded-xl hover:bg-red-500/10 hover:text-red-500 disabled:opacity-50 dark:hover:bg-red-500/20"
+                aria-label="Delete page"
+              >
+                <Trash2 className="h-4 w-4" />
               </button>
               <button
                 type="button"
@@ -774,6 +1125,45 @@ export default function ExcalidrawEditor({
           <CanvasShareSheet open={shareOpen} onClose={() => setShareOpen(false)} title="Share note">
             <SheetShareForm sheetId={sheetId} inviterName={userName} inviterImage={userImage} />
           </CanvasShareSheet>
+        ) : null}
+
+        {showImportModeDialog ? (
+          <div className="pointer-events-auto fixed inset-0 flex items-center justify-center p-6">
+            <div className="absolute inset-0 bg-black/55 backdrop-blur-sm" onClick={() => setShowImportModeDialog(false)} aria-hidden />
+            <div className="relative w-full max-w-md rounded-3xl border border-white/20 bg-[color-mix(in_srgb,var(--bg-surface)_95%,transparent)] p-6 shadow-2xl backdrop-blur-xl">
+              <h3 className="text-base font-semibold">Import PDF</h3>
+              <p className="mt-1 text-sm text-(--text-muted)">Choose how PDF pages should be placed in this note.</p>
+              <div className="mt-4 space-y-2">
+                <button type="button" className="w-full rounded-xl bg-black/5 px-3 py-2 text-left text-sm font-semibold hover:bg-black/10 dark:bg-white/10 dark:hover:bg-white/15" onClick={() => void runPdfImport("perPage")}>
+                  Create one note page per PDF page
+                </button>
+                <button type="button" className="w-full rounded-xl bg-black/5 px-3 py-2 text-left text-sm font-semibold hover:bg-black/10 dark:bg-white/10 dark:hover:bg-white/15" onClick={() => void runPdfImport("stackCurrent")}>
+                  Stack all PDF pages on current page
+                </button>
+                <button type="button" className="w-full rounded-xl bg-black/5 px-3 py-2 text-left text-sm font-semibold hover:bg-black/10 dark:bg-white/10 dark:hover:bg-white/15" onClick={() => void runPdfImport("stackNew")}>
+                  Stack all PDF pages on a new note page
+                </button>
+              </div>
+            </div>
+          </div>
+        ) : null}
+
+        {showExportModeDialog ? (
+          <div className="pointer-events-auto fixed inset-0 flex items-center justify-center p-6">
+            <div className="absolute inset-0 bg-black/55 backdrop-blur-sm" onClick={() => setShowExportModeDialog(false)} aria-hidden />
+            <div className="relative w-full max-w-md rounded-3xl border border-white/20 bg-[color-mix(in_srgb,var(--bg-surface)_95%,transparent)] p-6 shadow-2xl backdrop-blur-xl">
+              <h3 className="text-base font-semibold">Export PDF</h3>
+              <p className="mt-1 text-sm text-(--text-muted)">Export only the current page or the full note.</p>
+              <div className="mt-4 space-y-2">
+                <button type="button" className="w-full rounded-xl bg-black/5 px-3 py-2 text-left text-sm font-semibold hover:bg-black/10 dark:bg-white/10 dark:hover:bg-white/15" onClick={() => void runPdfExport("current")}>
+                  Export current page
+                </button>
+                <button type="button" className="w-full rounded-xl bg-black/5 px-3 py-2 text-left text-sm font-semibold hover:bg-black/10 dark:bg-white/10 dark:hover:bg-white/15" onClick={() => void runPdfExport("all")}>
+                  Export all note pages
+                </button>
+              </div>
+            </div>
+          </div>
         ) : null}
 
         {busy !== null ? (

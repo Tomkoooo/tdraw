@@ -5,6 +5,7 @@ import dbConnect from "@/lib/db/mongoose";
 import mongoose from "mongoose";
 import Folder from "@/lib/models/Folder";
 import FolderAccess from "@/lib/models/FolderAccess";
+import Sheet from "@/lib/models/Sheet";
 import { requireOrgMember, requireOrgAdmin } from "@/lib/authz/org";
 import type { FolderPermissionLevel } from "@/lib/models/FolderAccess";
 import { revalidatePath } from "next/cache";
@@ -56,6 +57,172 @@ export async function listFolders(opts: { organizationId?: string; ownerPersonal
   }
 
   throw new Error("Missing scope");
+}
+
+const LIVE_SHEET = { $or: [{ deletedAt: null }, { deletedAt: { $exists: false } }] };
+
+export type FolderTreeEntry = Awaited<ReturnType<typeof getFolderTree>>[number];
+
+/** Folders in scope with direct note counts, last activity, and up to 3 cover thumbnails. */
+export async function getFolderTree(opts: { organizationId?: string; ownerPersonal?: boolean }) {
+  const session = await auth();
+  if (!session?.user?.id) throw new Error("Unauthorized");
+  const userId = session.user.id;
+  await dbConnect();
+
+  const folders = await (async () => {
+    if (opts.organizationId) {
+      await requireOrgMember(userId, opts.organizationId);
+      return Folder.find({
+        $and: [{ organizationId: new mongoose.Types.ObjectId(opts.organizationId) }, LIVE_FOLDER],
+      })
+        .sort({ pinned: -1, order: 1, name: 1 })
+        .lean();
+    }
+    if (opts.ownerPersonal) {
+      return Folder.find({
+        $and: [{ ownerUserId: new mongoose.Types.ObjectId(userId) }, LIVE_FOLDER],
+      })
+        .sort({ pinned: -1, order: 1, name: 1 })
+        .lean();
+    }
+    throw new Error("Missing scope");
+  })();
+
+  if (folders.length === 0) return [];
+
+  const orgOid = opts.organizationId ? new mongoose.Types.ObjectId(opts.organizationId) : null;
+  const userOid = new mongoose.Types.ObjectId(userId);
+  const folderIds = folders.map((f) => f._id);
+  const sheetQ =
+    orgOid != null
+      ? {
+          $and: [LIVE_SHEET, { organizationId: orgOid }, { folderId: { $in: folderIds } }],
+        }
+      : {
+          $and: [
+            LIVE_SHEET,
+            { userId: userOid },
+            { $or: [{ organizationId: null }, { organizationId: { $exists: false } }] },
+            { folderId: { $in: folderIds } },
+          ],
+        };
+
+  const rawSheets = await Sheet.find(sheetQ)
+    .select("folderId previewImage updatedAt")
+    .sort({ updatedAt: -1 })
+    .lean()
+    .exec();
+
+  const byFolder = new Map<string, { previewImage?: string; updatedAt?: Date }[]>();
+  for (const s of rawSheets) {
+    if (!s.folderId) continue;
+    const id = String(s.folderId);
+    if (!byFolder.has(id)) byFolder.set(id, []);
+    byFolder.get(id)!.push({
+      previewImage: (s as { previewImage?: string }).previewImage,
+      updatedAt: s.updatedAt as Date,
+    });
+  }
+
+  return folders.map((f) => {
+    const list = (byFolder.get(String(f._id)) ?? [])
+      .slice()
+      .sort((a, b) => (b.updatedAt?.getTime() ?? 0) - (a.updatedAt?.getTime() ?? 0));
+    const last = list[0];
+    return {
+      ...mapFolder(f),
+      count: list.length,
+      lastActivity: last?.updatedAt ? new Date(last.updatedAt).toISOString() : null,
+      coverThumbs: list
+        .slice(0, 3)
+        .map((r) => (r.previewImage && r.previewImage.length > 0 ? r.previewImage : null))
+        .filter((p): p is string => p !== null),
+    };
+  });
+}
+
+function collectDescendantIds(folderId: string, byParent: Map<string | null, string[]>): Set<string> {
+  const out = new Set<string>();
+  const q = [folderId];
+  while (q.length) {
+    const cur = q.pop()!;
+    for (const c of byParent.get(cur) ?? []) {
+      if (out.has(c)) continue;
+      out.add(c);
+      q.push(c);
+    }
+  }
+  return out;
+}
+
+/**
+ * Re-parent a folder. Prevents moving into self or a descendant. Same owner/org as target parent.
+ */
+export async function moveFolder(folderId: string, newParentFolderId: string | null) {
+  const session = await auth();
+  if (!session?.user?.id) throw new Error("Unauthorized");
+  await dbConnect();
+
+  const f = await Folder.findById(folderId).lean();
+  if (!f || f.deletedAt) throw new Error("Not found");
+  if (f.ownerUserId) {
+    if (String(f.ownerUserId) !== session.user.id) throw new Error("Forbidden");
+  } else if (f.organizationId) {
+    await requireOrgMember(session.user.id, String(f.organizationId));
+  } else {
+    throw new Error("Forbidden");
+  }
+
+  if (newParentFolderId) {
+    if (newParentFolderId === folderId) throw new Error("Invalid move");
+    const p = await Folder.findOne({ _id: newParentFolderId, ...LIVE_FOLDER }).lean();
+    if (!p) throw new Error("Folder not found");
+    if (f.ownerUserId) {
+      if (!p.ownerUserId || String(p.ownerUserId) !== session.user.id) throw new Error("Invalid parent");
+    } else {
+      if (!f.organizationId || !p.organizationId || String(f.organizationId) !== String(p.organizationId)) {
+        throw new Error("Invalid parent");
+      }
+    }
+    const all = await Folder.find({
+      $or: f.ownerUserId
+        ? [{ ownerUserId: f.ownerUserId, ...LIVE_FOLDER }]
+        : [{ organizationId: f.organizationId, ...LIVE_FOLDER }],
+    })
+      .select("_id parentFolderId")
+      .lean();
+    const byParent = new Map<string | null, string[]>();
+    for (const x of all) {
+      const pid = x.parentFolderId ? String(x.parentFolderId) : null;
+      if (!byParent.has(pid)) byParent.set(pid, []);
+      byParent.get(pid)!.push(String(x._id));
+    }
+    const sub = collectDescendantIds(folderId, byParent);
+    if (sub.has(newParentFolderId)) throw new Error("Cannot move a folder into its own subtree");
+  }
+
+  if (f.ownerUserId) {
+    if (newParentFolderId) {
+      await Folder.updateOne(
+        { _id: folderId },
+        { $set: { parentFolderId: new mongoose.Types.ObjectId(newParentFolderId) } }
+      );
+    } else {
+      await Folder.updateOne({ _id: folderId }, { $unset: { parentFolderId: "" } });
+    }
+  } else {
+    await requireOrgMember(session.user.id, String(f.organizationId!));
+    if (newParentFolderId) {
+      await Folder.updateOne(
+        { _id: folderId },
+        { $set: { parentFolderId: new mongoose.Types.ObjectId(newParentFolderId) } }
+      );
+    } else {
+      await Folder.updateOne({ _id: folderId }, { $unset: { parentFolderId: "" } });
+    }
+  }
+  revalidatePath("/dashboard");
 }
 
 export async function getTrashedFoldersPersonal() {
@@ -137,6 +304,27 @@ export async function createFolder(input: {
   }
 
   throw new Error("Missing scope");
+}
+
+export async function renameFolder(folderId: string, name: string) {
+  const session = await auth();
+  if (!session?.user?.id) throw new Error("Unauthorized");
+  const nm = name.trim().slice(0, 200) || "Folder";
+  await dbConnect();
+  const f = await Folder.findById(folderId).lean();
+  if (!f || f.deletedAt) throw new Error("Not found");
+  if (f.ownerUserId && String(f.ownerUserId) === session.user.id) {
+    await Folder.updateOne({ _id: folderId }, { $set: { name: nm } });
+    revalidatePath("/dashboard");
+    return;
+  }
+  if (f.organizationId) {
+    await requireOrgMember(session.user.id, String(f.organizationId));
+    await Folder.updateOne({ _id: folderId }, { $set: { name: nm } });
+    revalidatePath("/dashboard");
+    return;
+  }
+  throw new Error("Forbidden");
 }
 
 export async function setFolderPinned(folderId: string, pinned: boolean) {

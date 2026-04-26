@@ -55,27 +55,60 @@ function ensurePdfWorker(pdfjs: typeof import("pdfjs-dist/legacy/build/pdf.mjs")
 }
 
 const MAX_PAGE_PX = 2400;
+const PAGE_GAP = 50;
 
-export async function importPdfToEditor(excalidrawAPI: ExcalidrawForImport, file: File) {
+function toImageElement(fileId: string, id: string, width: number, height: number, y: number): ExcalidrawImageElement {
+  const now = Date.now();
+  return {
+    type: "image",
+    id,
+    x: 0,
+    y,
+    width,
+    height,
+    fileId,
+    status: "saved",
+    seed: Math.floor(Math.random() * 2 ** 31),
+    version: 1,
+    versionNonce: Math.floor(Math.random() * 2 ** 31),
+    isDeleted: false,
+    boundElements: null,
+    updated: now,
+    link: null,
+    locked: true,
+    opacity: 100,
+    groupIds: [],
+    frameId: null,
+    roundness: null,
+    angle: 0,
+    strokeColor: "transparent",
+    backgroundColor: "transparent",
+    fillStyle: "solid",
+    strokeWidth: 1,
+    strokeStyle: "solid",
+    roughness: 1,
+    isStrokeDisabled: true,
+    isBackgroundDisabled: false,
+    isCropLocked: false,
+    crop: null,
+  };
+}
+
+export type PdfImportedPage = {
+  file: BinaryFileData;
+  imageElement: ExcalidrawImageElement;
+};
+
+export async function renderPdfToPages(file: File): Promise<PdfImportedPage[]> {
   const pdfjs = await import("pdfjs-dist/legacy/build/pdf.mjs");
   ensurePdfWorker(pdfjs);
 
   const buf = new Uint8Array(await file.arrayBuffer());
   const pdf = await pdfjs.getDocument({ data: buf }).promise;
-
-  const currentElements = excalidrawAPI.getSceneElements();
-  const nextElements = [...currentElements];
-  const nextFiles: BinaryFileData[] = [];
-  
-  let currentY = 0;
-  if (currentElements.length > 0) {
-    const bottomElement = currentElements.reduce((prev, curr) => 
-      ((curr.y + curr.height) > (prev.y + prev.height) ? curr : prev)
-    , currentElements[0]);
-    currentY = bottomElement.y + bottomElement.height + 50;
-  }
+  const importedPages: PdfImportedPage[] = [];
 
   for (let i = 0; i < pdf.numPages; i++) {
+    const now = Date.now();
     const page = await pdf.getPage(i + 1);
     const baseViewport = page.getViewport({ scale: 1 });
     const scale = Math.min(2, MAX_PAGE_PX / Math.max(baseViewport.width, baseViewport.height));
@@ -88,55 +121,47 @@ export async function importPdfToEditor(excalidrawAPI: ExcalidrawForImport, file
     await page.render({ canvasContext: canvas.getContext("2d")!, viewport, canvas }).promise;
 
     const dataURL = canvas.toDataURL("image/png");
-    const fileId = "file-pdf-" + Date.now() + "-" + i;
-
-    nextFiles.push({
+    const fileId = `file-pdf-${now}-${i}`;
+    const imageId = `img-${now}-${i}`;
+    const width = Math.floor(viewport.width);
+    const height = Math.floor(viewport.height);
+    importedPages.push({
+      file: {
       id: fileId,
       dataURL,
       mimeType: "image/png",
-      created: Date.now(),
-      lastRetrieved: Date.now()
+      created: now,
+      lastRetrieved: now,
+      },
+      imageElement: toImageElement(fileId, imageId, width, height, 0),
     });
-
-    const imageElement: ExcalidrawImageElement = {
-      type: "image",
-      id: "img-" + Date.now() + "-" + i,
-      x: 0,
-      y: currentY,
-      width: Math.floor(viewport.width),
-      height: Math.floor(viewport.height),
-      fileId,
-      status: "saved",
-      seed: Math.floor(Math.random() * 2 ** 31),
-      version: 1,
-      versionNonce: Math.floor(Math.random() * 2 ** 31),
-      isDeleted: false,
-      boundElements: null,
-      updated: Date.now(),
-      link: null,
-      locked: false,
-      opacity: 100,
-      groupIds: [],
-      frameId: null,
-      roundness: null,
-      angle: 0,
-      strokeColor: "transparent",
-      backgroundColor: "transparent",
-      fillStyle: "solid",
-      strokeWidth: 1,
-      strokeStyle: "solid",
-      roughness: 1,
-      isStrokeDisabled: true,
-      isBackgroundDisabled: false,
-      isCropLocked: false,
-      crop: null,
-    };
-    nextElements.push(imageElement);
-
-    currentY += Math.floor(viewport.height) + 50;
   }
 
   pdf.destroy();
+  return importedPages;
+}
+
+export async function importPdfToEditor(excalidrawAPI: ExcalidrawForImport, file: File) {
+  const importedPages = await renderPdfToPages(file);
+  const currentElements = excalidrawAPI.getSceneElements();
+  const nextElements = [...currentElements];
+  const nextFiles: BinaryFileData[] = importedPages.map((page) => page.file);
+
+  let currentY = 0;
+  if (currentElements.length > 0) {
+    const bottomElement = currentElements.reduce((prev, curr) =>
+      curr.y + curr.height > prev.y + prev.height ? curr : prev,
+    currentElements[0]);
+    currentY = bottomElement.y + bottomElement.height + PAGE_GAP;
+  }
+
+  for (const importedPage of importedPages) {
+    nextElements.push({
+      ...importedPage.imageElement,
+      y: currentY,
+    });
+    currentY += importedPage.imageElement.height + PAGE_GAP;
+  }
 
   excalidrawAPI.addFiles(nextFiles);
   excalidrawAPI.updateScene({ elements: nextElements });
