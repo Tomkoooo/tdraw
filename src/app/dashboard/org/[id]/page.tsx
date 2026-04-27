@@ -26,11 +26,11 @@ export default async function OrgManagePage({ params }: { params: Promise<{ id: 
         <div className="glass-thick rounded-[1.75rem] p-4 md:p-5">
           <div className="flex flex-wrap items-center justify-between gap-3">
             <Link
-              href="/dashboard"
+              href={`/dashboard?node=org&org=${id}`}
               className="inline-flex min-h-[44px] items-center gap-2 rounded-2xl px-4 text-sm font-semibold hover:bg-black/5 dark:hover:bg-white/10"
             >
               <ChevronLeft className="h-4 w-4" />
-              Dashboard
+              Back to org
             </Link>
             <div className="flex items-center gap-2 rounded-2xl bg-[var(--input-bg)] px-3 py-2 text-sm font-semibold">
               <Building2 className="h-4 w-4 text-[var(--color-accent)]" />

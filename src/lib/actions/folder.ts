@@ -21,10 +21,13 @@ function mapFolder(f: {
   createdAt?: Date;
   updatedAt?: Date;
 }) {
+  const sid = String(f._id);
+  let parentFolderId: string | null = f.parentFolderId ? String(f.parentFolderId) : null;
+  if (parentFolderId === sid) parentFolderId = null;
   return {
-    _id: String(f._id),
+    _id: sid,
     name: f.name ?? "Folder",
-    parentFolderId: f.parentFolderId ? String(f.parentFolderId) : null,
+    parentFolderId,
     order: f.order ?? 0,
     pinned: !!f.pinned,
     createdAt: f.createdAt ? new Date(f.createdAt).toISOString() : new Date().toISOString(),

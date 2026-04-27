@@ -16,6 +16,7 @@ function buildChildrenMap(rows: Row[]) {
   const byParent = new Map<string | null, Row[]>();
   for (const r of rows) {
     const p = r.parentFolderId ?? null;
+    if (p === r._id) continue;
     if (!byParent.has(p)) byParent.set(p, []);
     byParent.get(p)!.push(r);
   }

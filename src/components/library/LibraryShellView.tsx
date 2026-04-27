@@ -6,7 +6,20 @@ import { SortableContext, rectSortingStrategy } from "@dnd-kit/sortable";
 import Link from "next/link";
 import type { AppRouterInstance } from "next/dist/shared/lib/app-router-context.shared-runtime";
 import { useCallback, useEffect, useMemo, useState } from "react";
-import { CalendarDays, CheckSquare, LayoutGrid, List, MoreHorizontal, Pencil, Search, Share2, Sparkles, UserRound } from "lucide-react";
+import {
+  Bell,
+  Building2,
+  CalendarDays,
+  CheckSquare,
+  LayoutGrid,
+  List,
+  MoreHorizontal,
+  Pencil,
+  Search,
+  Share2,
+  Sparkles,
+  UserRound,
+} from "lucide-react";
 import { createFolder, permanentlyDeleteFolder, restoreFolderFromTrash, renameFolder } from "@/lib/actions/folder";
 import {
   createSheet,
@@ -233,10 +246,14 @@ export default function LibraryShellView(v: LibraryShellViewProps) {
     if (v.node === "drive" && !v.orgId && !v.folderId) return v.pTree.filter((f) => !f.parentFolderId);
     if (v.node === "org" && v.orgId && v.curOrgTree) return v.curOrgTree.filter((f) => !f.parentFolderId);
     if (v.node === "drive" && v.orgId == null && v.folderId) {
-      return v.pTree.filter((f) => f.parentFolderId === v.folderId);
+      return v.pTree.filter(
+        (f) => f._id !== v.folderId && f.parentFolderId === v.folderId && f.parentFolderId !== f._id,
+      );
     }
     if (v.node === "org" && v.orgId && v.folderId) {
-      return (v.curOrgTree ?? []).filter((f) => f.parentFolderId === v.folderId);
+      return (v.curOrgTree ?? []).filter(
+        (f) => f._id !== v.folderId && f.parentFolderId === v.folderId && f.parentFolderId !== f._id,
+      );
     }
     return [];
   }, [v.node, v.orgId, v.folderId, v.pTree, v.curOrgTree]);
@@ -297,7 +314,7 @@ export default function LibraryShellView(v: LibraryShellViewProps) {
               else if (n === "trash") v.setSp({ node: "trash", folder: null, org: null });
               else if (n === "shared") v.setSp({ node: "shared", folder: null, org: null });
             }}
-            onSetShared={(s) => v.setSp({ sw: s })}
+            onOpenShared={(sub) => v.setSp({ node: "shared", folder: null, org: null, sw: sub })}
             onOpenFolder={(id, ctx) => {
               if (ctx === "drive") v.setSp({ node: "drive", org: null, folder: id });
               else if (v.orgId) v.setSp({ node: "org", org: v.orgId, folder: id });
@@ -328,6 +345,22 @@ export default function LibraryShellView(v: LibraryShellViewProps) {
                     <h1 className="max-w-2xl truncate text-2xl font-bold tracking-tight text-[var(--color-text)] md:text-[28px]">Library</h1>
                   </div>
                   <div className="ml-auto flex shrink-0 items-center gap-2">
+                    <Link
+                      href="/dashboard/invites"
+                      className="glass-panel relative flex h-11 w-11 items-center justify-center rounded-2xl touch-manipulation animate-micro hover:lift-sm active:scale-95"
+                      aria-label={
+                        v.p.pendingInviteCount > 0
+                          ? `Invitations, ${v.p.pendingInviteCount} pending`
+                          : "Invitations"
+                      }
+                    >
+                      <Bell className="h-5 w-5" />
+                      {v.p.pendingInviteCount > 0 ? (
+                        <span className="absolute -right-0.5 -top-0.5 flex h-5 min-w-5 items-center justify-center rounded-full bg-red-500 px-1 text-[10px] font-bold leading-none text-white shadow-sm">
+                          {v.p.pendingInviteCount > 99 ? "99+" : v.p.pendingInviteCount}
+                        </span>
+                      ) : null}
+                    </Link>
                     <ThemeToggle />
                     <div className="relative">
                       <button
@@ -348,6 +381,31 @@ export default function LibraryShellView(v: LibraryShellViewProps) {
                             onClick={closeMenu}
                           />
                           <div className="glass-menu absolute right-0 top-12 z-[110] min-w-[12rem] overflow-hidden rounded-2xl py-2 shadow-xl">
+                            {v.node === "org" && v.orgId ? (
+                              <Link
+                                href={`/dashboard/org/${v.orgId}`}
+                                className="flex min-h-11 items-center gap-2 px-4 py-2.5 text-sm font-semibold hover:bg-black/5 dark:hover:bg-white/10"
+                                onClick={closeMenu}
+                              >
+                                <Building2 className="h-4 w-4 opacity-70" />
+                                Manage organization
+                              </Link>
+                            ) : null}
+                            <Link
+                              href="/dashboard/invites"
+                              className="flex min-h-11 w-full items-center justify-between gap-2 px-4 py-2.5 text-sm font-semibold hover:bg-black/5 dark:hover:bg-white/10"
+                              onClick={closeMenu}
+                            >
+                              <span className="flex items-center gap-2">
+                                <Bell className="h-4 w-4 shrink-0 opacity-70" />
+                                Invitations
+                              </span>
+                              {v.p.pendingInviteCount > 0 ? (
+                                <span className="shrink-0 rounded-full bg-red-500 px-2 py-0.5 text-[10px] font-bold text-white">
+                                  {v.p.pendingInviteCount > 99 ? "99+" : v.p.pendingInviteCount}
+                                </span>
+                              ) : null}
+                            </Link>
                             <Link
                               href="/dashboard/tasks"
                               className="flex min-h-11 items-center gap-2 px-4 py-2.5 text-sm font-semibold hover:bg-black/5 dark:hover:bg-white/10"
@@ -389,6 +447,15 @@ export default function LibraryShellView(v: LibraryShellViewProps) {
                     crumbs={breadcrumbCrumbs}
                     onNavigate={(id) => v.setSp({ folder: id })}
                   />
+                  {v.node === "org" && v.orgId ? (
+                    <Link
+                      href={`/dashboard/org/${v.orgId}`}
+                      className="mt-2 inline-flex min-h-9 items-center gap-1.5 rounded-xl px-1 py-1 text-sm font-semibold text-[var(--color-accent)] hover:bg-[var(--color-accent)]/10"
+                    >
+                      <Building2 className="h-4 w-4 shrink-0 opacity-80" />
+                      Manage organization
+                    </Link>
+                  ) : null}
                   <p className="mt-1.5 text-sm text-gray-500 dark:text-gray-400">Hello, {p.userFirstName}</p>
                 </div>
                 {/* Row 3: toolbar — search vs layout vs create */}
@@ -821,6 +888,8 @@ export default function LibraryShellView(v: LibraryShellViewProps) {
         onClose={() => v.setCmd(false)}
         onNavigate={() => void 0}
         orgs={p.orgs}
+        manageOrgId={v.node === "org" ? v.orgId : null}
+        pendingInviteCount={v.p.pendingInviteCount}
         hasSelection={v.sel.size > 0}
         onOpenMove={openMoveForSelection}
       />

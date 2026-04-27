@@ -112,6 +112,7 @@ export async function createSheetInvite(
       : "failed";
 
   revalidatePath("/dashboard");
+  revalidatePath("/dashboard/invites");
   revalidatePath(`/sheet/${sheetId}`);
   return { ok: true as const, emailStatus };
 }
@@ -152,6 +153,54 @@ export async function acceptSheetInviteByToken(rawToken: string) {
 
   const sid = String(inv.sheetId);
   revalidatePath("/dashboard");
+  revalidatePath("/dashboard/invites");
+  revalidatePath("/", "layout");
+  revalidatePath(`/sheet/${sid}`);
+  return { sheetId: sid };
+}
+
+/**
+ * Accept a pending sheet invite for the signed-in user's email (same outcome as opening the email link).
+ * Requires a verified session email matching the invitation.
+ */
+export async function acceptPendingSheetInviteForSession(sheetId: string) {
+  const session = await auth();
+  if (!session?.user?.id) throw new Error("Unauthorized");
+  if (!session.user.email) throw new Error("No email on session");
+
+  await dbConnect();
+  const email = session.user.email.trim().toLowerCase();
+  const now = new Date();
+  const inv = await SheetInvitation.findOne({
+    sheetId: new mongoose.Types.ObjectId(sheetId),
+    email,
+    acceptedAt: { $exists: false },
+    expiresAt: { $gt: now },
+  }).lean();
+  if (!inv) throw new Error("No pending invitation for this note");
+
+  await SheetGrant.updateOne(
+    { sheetId: inv.sheetId, granteeUserId: new mongoose.Types.ObjectId(session.user.id) },
+    {
+      $set: {
+        sheetId: inv.sheetId,
+        granteeUserId: new mongoose.Types.ObjectId(session.user.id),
+        role: inv.role,
+        via: "share",
+        allowForwardShare: inv.allowForwardShare,
+      },
+    },
+    { upsert: true }
+  );
+
+  await SheetInvitation.updateOne(
+    { _id: inv._id },
+    { $set: { acceptedAt: new Date(), acceptedByUserId: new mongoose.Types.ObjectId(session.user.id) } }
+  );
+
+  const sid = String(inv.sheetId);
+  revalidatePath("/dashboard");
+  revalidatePath("/dashboard/invites");
   revalidatePath("/", "layout");
   revalidatePath(`/sheet/${sid}`);
   return { sheetId: sid };

@@ -11,6 +11,7 @@ export function childrenMap(rows: Row[]) {
   const by = new Map<string | null, Row[]>();
   for (const r of rows) {
     const p = r.parentFolderId ?? null;
+    if (p === r._id) continue;
     if (!by.has(p)) by.set(p, []);
     by.get(p)!.push(r);
   }

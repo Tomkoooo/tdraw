@@ -89,7 +89,7 @@ export default function LibrarySidebar({
   orgId,
   shared,
   onPickNode,
-  onSetShared,
+  onOpenShared,
   onOpenFolder,
   personalTree,
   orgs,
@@ -103,7 +103,8 @@ export default function LibrarySidebar({
   orgId: string | null;
   shared: SharedSub;
   onPickNode: (n: LibraryNode) => void;
-  onSetShared: (s: SharedSub) => void;
+  /** Single navigation — must set `node=shared` and `sw` together (avoid two router.replace races). */
+  onOpenShared: (sub: SharedSub) => void;
   onOpenFolder: (id: string | null, context: "drive" | "org") => void;
   personalTree: FolderTreeEntry[];
   orgs: OrgRow[];
@@ -159,10 +160,7 @@ export default function LibrarySidebar({
       <div className="mt-4 text-[9px] font-bold uppercase text-gray-500 md:pl-0.5">Shared</div>
       <button
         type="button"
-        onClick={() => {
-          onPickNode("shared");
-          onSetShared("with");
-        }}
+        onClick={() => onOpenShared("with")}
         className={`w-full min-h-8 rounded-lg px-1.5 text-left text-xs ${
           node === "shared" && shared === "with" ? "font-bold text-[var(--color-accent)]" : "hover:bg-black/5"
         }`}
@@ -174,10 +172,7 @@ export default function LibrarySidebar({
       </button>
       <button
         type="button"
-        onClick={() => {
-          onPickNode("shared");
-          onSetShared("by");
-        }}
+        onClick={() => onOpenShared("by")}
         className={`mt-0.5 w-full min-h-8 rounded-lg px-1.5 text-left text-xs ${
           node === "shared" && shared === "by" ? "font-bold text-[var(--color-accent)]" : "hover:bg-black/5"
         }`}

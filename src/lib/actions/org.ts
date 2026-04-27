@@ -144,6 +144,7 @@ export async function inviteOrganizationMember(organizationId: string, email: st
   });
 
   revalidatePath("/dashboard");
+  revalidatePath("/dashboard/invites");
   revalidatePath(`/dashboard/org/${organizationId}`);
   return { ok: true as const };
 }
@@ -240,6 +241,49 @@ export async function acceptOrgInviteByToken(rawToken: string) {
 
   const oid = String(inv.organizationId);
   revalidatePath("/dashboard");
+  revalidatePath("/dashboard/invites");
+  revalidatePath(`/dashboard/org/${oid}`);
+  return { organizationId: oid };
+}
+
+/**
+ * Accept a pending org invite for the signed-in user's email (same as using the invite link).
+ */
+export async function acceptPendingOrgInviteForSession(organizationId: string) {
+  const session = await auth();
+  if (!session?.user?.id || !session.user.email) throw new Error("Unauthorized");
+
+  await dbConnect();
+  const email = session.user.email.trim().toLowerCase();
+  const now = new Date();
+  const inv = await OrganizationInvitation.findOne({
+    organizationId: new mongoose.Types.ObjectId(organizationId),
+    email,
+    acceptedAt: { $exists: false },
+    expiresAt: { $gt: now },
+  }).lean();
+  if (!inv) throw new Error("No pending invitation for this organization");
+
+  await OrganizationMember.updateOne(
+    { organizationId: inv.organizationId, userId: new mongoose.Types.ObjectId(session.user.id) },
+    {
+      $set: {
+        organizationId: inv.organizationId,
+        userId: new mongoose.Types.ObjectId(session.user.id),
+        role: inv.role,
+      },
+    },
+    { upsert: true }
+  );
+
+  await OrganizationInvitation.updateOne(
+    { _id: inv._id },
+    { $set: { acceptedAt: new Date(), acceptedByUserId: new mongoose.Types.ObjectId(session.user.id) } }
+  );
+
+  const oid = String(inv.organizationId);
+  revalidatePath("/dashboard");
+  revalidatePath("/dashboard/invites");
   revalidatePath(`/dashboard/org/${oid}`);
   return { organizationId: oid };
 }

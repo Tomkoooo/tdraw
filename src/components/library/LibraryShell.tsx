@@ -73,6 +73,7 @@ export type LibraryShellProps = {
   orgStorageByOrg: Record<string, { used: number; quota: number }>;
   initialFolderId: string | null;
   initialFolderSheets: SheetCard[] | null;
+  pendingInviteCount: number;
 };
 
 export default function LibraryShell(p: LibraryShellProps) {

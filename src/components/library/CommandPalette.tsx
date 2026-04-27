@@ -2,7 +2,7 @@
 
 import { useEffect, useState } from "react";
 import { createPortal } from "react-dom";
-import { Building2, CheckSquare, Command, FileJson, Folder, Home, LayoutGrid, Settings, Trash2 } from "lucide-react";
+import { Bell, Building2, CheckSquare, Command, FileJson, Folder, Home, LayoutGrid, Settings, Trash2 } from "lucide-react";
 import { useTheme } from "@/components/ThemeProvider";
 import { useRouter } from "next/navigation";
 import { createFolder } from "@/lib/actions/folder";
@@ -15,6 +15,8 @@ export default function CommandPalette({
   onClose,
   onNavigate,
   orgs,
+  manageOrgId,
+  pendingInviteCount = 0,
   hasSelection,
   onOpenMove,
 }: {
@@ -22,6 +24,9 @@ export default function CommandPalette({
   onClose: () => void;
   onNavigate: (node: LibraryNode) => void;
   orgs: OrgRow[];
+  /** When set (org workspace open), offer a jump to members & invites. */
+  manageOrgId?: string | null;
+  pendingInviteCount?: number;
   hasSelection: boolean;
   onOpenMove: () => void;
 }) {
@@ -49,6 +54,15 @@ export default function CommandPalette({
     { id: "drive", label: "My Drive", icon: FileJson, run: () => (onNavigate("drive"), onClose(), r.push("/dashboard?node=drive")) },
     { id: "shared", label: "Shared", icon: FileJson, run: () => (onNavigate("shared"), onClose(), r.push("/dashboard?node=shared&sw=with")) },
     { id: "trash", label: "Trash", icon: Trash2, run: () => (onNavigate("trash"), onClose(), r.push("/dashboard?node=trash")) },
+    {
+      id: "invites",
+      label:
+        pendingInviteCount > 0
+          ? `Invitations (${pendingInviteCount > 99 ? "99+" : pendingInviteCount} pending)`
+          : "Invitations",
+      icon: Bell,
+      run: () => (r.push("/dashboard/invites"), onClose()),
+    },
     { id: "settings", label: "Settings", icon: Settings, run: () => (r.push("/settings"), onClose()) },
     { id: "tasks", label: "Tasks (Kanban)", icon: CheckSquare, run: () => (r.push("/dashboard/tasks"), onClose()) },
     {
@@ -90,6 +104,18 @@ export default function CommandPalette({
       label: `Open ${o.name}`,
       icon: Building2,
       run: () => (onNavigate("org"), onClose(), r.push(`/dashboard?node=org&org=${o._id}`)),
+    });
+  }
+  if (manageOrgId) {
+    const name = orgs.find((o) => o._id === manageOrgId)?.name;
+    items.push({
+      id: "manage-org",
+      label: name ? `Manage “${name}”` : "Manage organization",
+      icon: Building2,
+      run: () => {
+        r.push(`/dashboard/org/${manageOrgId}`);
+        onClose();
+      },
     });
   }
   items.push(

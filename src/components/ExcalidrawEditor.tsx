@@ -107,8 +107,17 @@ type RemoteCursor = {
   name: string;
   at: number;
   laser?: boolean;
-  trail?: { x: number; y: number }[];
+  /** Laser stroke samples; `t` is used to drop old segments quickly. */
+  trail?: { x: number; y: number; t: number }[];
 };
+
+/** Drop trail segments older than this so the laser tail vanishes quickly. */
+const LASER_TRAIL_POINT_MS = 320;
+/** Remove laser cursor overlay soon after the peer stops sending. */
+const REMOTE_LASER_IDLE_MS = 550;
+/** Non-laser remote pointer can stay visible longer while idle. */
+const REMOTE_CURSOR_STALE_MS = 2000;
+const CURSOR_PRUNE_INTERVAL_MS = 120;
 
 const queueKey = (sheetId: string) => `excalidraw-save-queue-${sheetId}`;
 const cachedDocKey = (sheetId: string) => `excalidraw-cached-doc-${sheetId}`;
@@ -862,14 +871,30 @@ export default function ExcalidrawEditor({
         let changed = false;
         const next = { ...prev };
         for (const k of Object.keys(next)) {
-          if (now - (next[k]?.at ?? 0) > 2000) {
+          const c = next[k];
+          if (!c) continue;
+
+          if (c.trail && c.trail.length > 0) {
+            const trimmed = c.trail.filter((p) => now - p.t < LASER_TRAIL_POINT_MS);
+            const nextTrail = trimmed.length >= 2 ? trimmed : [];
+            if (nextTrail.length !== c.trail.length) {
+              next[k] = { ...c, trail: nextTrail };
+              changed = true;
+            }
+          }
+
+          const cur = next[k];
+          if (!cur) continue;
+          const laserish = Boolean(cur.laser) || (cur.trail?.length ?? 0) >= 2;
+          const staleMs = laserish ? REMOTE_LASER_IDLE_MS : REMOTE_CURSOR_STALE_MS;
+          if (now - cur.at > staleMs) {
             delete next[k];
             changed = true;
           }
         }
         return changed ? next : prev;
       });
-    }, 800);
+    }, CURSOR_PRUNE_INTERVAL_MS);
     return () => clearInterval(id);
   }, []);
 
@@ -1075,10 +1100,14 @@ export default function ExcalidrawEditor({
             const ry = payload.y;
             const fsid = payload.fromSocketId as string;
             const laser = Boolean(payload.laser);
+            const now = Date.now();
             setRemoteCursors((prev) => {
               const prior = prev[fsid];
               const trail = laser
-                ? [...(prior?.trail ?? []), { x: rx, y: ry }].slice(-160)
+                ? [
+                    ...(prior?.trail ?? []).filter((p) => now - p.t < LASER_TRAIL_POINT_MS),
+                    { x: rx, y: ry, t: now },
+                  ].slice(-72)
                 : [];
               return {
                 ...prev,
@@ -1088,7 +1117,7 @@ export default function ExcalidrawEditor({
                   pageId: payload.pageId,
                   color: payload.color || "#0071E3",
                   name: payload.name || "User",
-                  at: Date.now(),
+                  at: now,
                   laser,
                   trail,
                 },

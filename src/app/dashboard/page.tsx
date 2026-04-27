@@ -12,6 +12,7 @@ import {
 import { listMyOrganizations } from "@/lib/actions/org";
 import { getFolderTree, getTrashedFoldersPersonal } from "@/lib/actions/folder";
 import { getPersonalDriveStorage, getOrganizationDriveStorage } from "@/lib/actions/storage";
+import { countPendingIncomingInvitations } from "@/lib/actions/incomingInvites";
 import LibraryShell from "@/components/library/LibraryShell";
 import { unstable_noStore as noStore } from "next/cache";
 
@@ -53,6 +54,7 @@ export default async function Dashboard({ searchParams }: { searchParams: Promis
     trashedSheets,
     trashedFolders,
     personalStorage,
+    pendingInviteCount,
   ] = await Promise.all([
     getMySheets(),
     getRootDriveSheets(),
@@ -62,6 +64,7 @@ export default async function Dashboard({ searchParams }: { searchParams: Promis
     getTrashedSheets(),
     getTrashedFoldersPersonal(),
     getPersonalDriveStorage(),
+    countPendingIncomingInvitations(),
   ]);
 
   const folderQ = sp.folder;
@@ -85,6 +88,7 @@ export default async function Dashboard({ searchParams }: { searchParams: Promis
         userFirstName={first}
         userDisplayName={displayName}
         userImage={session?.user?.image ?? null}
+        pendingInviteCount={pendingInviteCount}
         mine={mine}
         homeSheets={mine}
         rootDriveSheets={rootDriveSheets}
