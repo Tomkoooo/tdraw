@@ -112,6 +112,28 @@ const queueKey = (sheetId: string) => `excalidraw-save-queue-${sheetId}`;
 const cachedDocKey = (sheetId: string) => `excalidraw-cached-doc-${sheetId}`;
 const DEFAULT_PAGE_NAME = "Page 1";
 
+type CachedDocumentEnvelope = {
+  doc: PersistedDocument;
+  contentVersion: number;
+  updatedAt: number;
+};
+
+function parseCachedDocument(raw: unknown): CachedDocumentEnvelope | null {
+  if (!isObj(raw) || !("doc" in raw)) return null;
+  const contentVersion = typeof raw.contentVersion === "number" && Number.isFinite(raw.contentVersion) ? raw.contentVersion : 0;
+  const updatedAt = typeof raw.updatedAt === "number" && Number.isFinite(raw.updatedAt) ? raw.updatedAt : Date.now();
+  return { doc: parsePersistedDocument(raw.doc), contentVersion, updatedAt };
+}
+
+async function writeCachedDocument(sheetId: string, doc: PersistedDocument, contentVersion: number) {
+  const envelope: CachedDocumentEnvelope = {
+    doc,
+    contentVersion: Number.isFinite(contentVersion) ? contentVersion : 0,
+    updatedAt: Date.now(),
+  };
+  await localforage.setItem(cachedDocKey(sheetId), envelope);
+}
+
 function isObj(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null;
 }
@@ -296,6 +318,8 @@ export default function ExcalidrawEditor({
   const [saveState, setSaveState] = useState<SaveState>("saved");
   const [isOnline, setIsOnline] = useState(true);
   const [minimapState, setMinimapState] = useState<MinimapState>({ scene: null, viewport: null });
+  const [renamePageOpen, setRenamePageOpen] = useState(false);
+  const [renamePageValue, setRenamePageValue] = useState("");
 
   const pdfInputRef = useRef<HTMLInputElement>(null);
   const apiRef = useRef<ExcalidrawImperativeApiLike | null>(null);
@@ -465,7 +489,7 @@ export default function ExcalidrawEditor({
         if (!hasNewerLocalEdits) {
           setDocumentState(savedDoc);
           docStateRef.current = savedDoc;
-          await localforage.setItem(cachedDocKey(sheetId), savedDoc);
+          await writeCachedDocument(sheetId, savedDoc, versionRef.current);
           sceneFingerprintRef.current = buildSceneFingerprint(api.getSceneElements() as unknown as Record<string, unknown>[]);
           hasLocalUnsavedEditsRef.current = false;
           setSaveState("saved");
@@ -478,7 +502,7 @@ export default function ExcalidrawEditor({
               files: { ...prev.files, ...savedDoc.files },
             };
             docStateRef.current = merged;
-            void localforage.setItem(cachedDocKey(sheetId), merged);
+            void writeCachedDocument(sheetId, merged, versionRef.current);
             return merged;
           });
           setSaveState("unsaved");
@@ -649,7 +673,7 @@ export default function ExcalidrawEditor({
           ),
         };
         docStateRef.current = updated;
-        void localforage.setItem(cachedDocKey(sheetId), updated);
+        void writeCachedDocument(sheetId, updated, versionRef.current);
         return updated;
       });
       lastLocalSceneEditAtRef.current = Date.now();
@@ -742,15 +766,18 @@ export default function ExcalidrawEditor({
   }, [activePageId, applyScene]);
 
   useEffect(() => {
-    const loadCachedDoc = async () => {
-      if (typeof navigator === "undefined" || navigator.onLine) return;
-      const cached = await localforage.getItem<unknown>(cachedDocKey(sheetId));
-      if (!cached) return;
-      const parsed = parsePersistedDocument(cached);
-      setDocumentState(parsed);
-      docStateRef.current = parsed;
-      setActivePageId(parsed.activePageId);
-    };
+      const loadCachedDoc = async () => {
+        if (typeof navigator === "undefined" || navigator.onLine) return;
+        const queue = ((await localforage.getItem<unknown[]>(queueKey(sheetId))) ?? []) as unknown[];
+        if (queue.length === 0) return;
+        const cached = await localforage.getItem<unknown>(cachedDocKey(sheetId));
+        if (!cached) return;
+        const envelope = parseCachedDocument(cached);
+        const parsed = envelope?.doc ?? parsePersistedDocument(cached);
+        setDocumentState(parsed);
+        docStateRef.current = parsed;
+        setActivePageId(parsed.activePageId);
+      };
     void loadCachedDoc();
   }, [sheetId]);
 
@@ -831,6 +858,7 @@ export default function ExcalidrawEditor({
               files: Object.values(parsedDoc.files),
             });
             versionRef.current = incomingVersion;
+            void writeCachedDocument(sheetId, parsedDoc, incomingVersion);
             hasLocalUnsavedEditsRef.current = false;
           },
         );
@@ -1212,11 +1240,12 @@ export default function ExcalidrawEditor({
     docStateRef.current = nextDoc;
     setDocumentState(nextDoc);
     setActivePageId(newPage.id);
-  }, [canWrite, documentState]);
+    void flushSave(false);
+  }, [canWrite, documentState, flushSave]);
 
   const onRenamePage = useCallback(() => {
     if (!activePage || !canWrite) return;
-    const nextName = window.prompt("Rename page", activePage.name)?.trim();
+    const nextName = renamePageValue.trim();
     if (!nextName) return;
     const nextDoc: PersistedDocument = {
       ...documentState,
@@ -1224,7 +1253,10 @@ export default function ExcalidrawEditor({
     };
     docStateRef.current = nextDoc;
     setDocumentState(nextDoc);
-  }, [activePage, canWrite, documentState]);
+    setRenamePageOpen(false);
+    setRenamePageValue("");
+    void flushSave(false);
+  }, [activePage, canWrite, documentState, flushSave, renamePageValue]);
 
   const onDeletePage = useCallback(() => {
     if (!activePage || !canWrite) return;
@@ -1243,7 +1275,8 @@ export default function ExcalidrawEditor({
     docStateRef.current = nextDoc;
     setDocumentState(nextDoc);
     setActivePageId(nextActive.id);
-  }, [activePage, canWrite, documentState]);
+    void flushSave(false);
+  }, [activePage, canWrite, documentState, flushSave]);
 
   const busyLabel = busy === "import" ? "Importing PDF..." : busy === "export" ? "Exporting PDF..." : "";
   const saveStateMeta = useMemo(() => {
@@ -1473,7 +1506,12 @@ export default function ExcalidrawEditor({
                 </button>
                 <button
                   type="button"
-                  onClick={onRenamePage}
+                  onClick={() => {
+                    if (!activePage || !canWrite) return;
+                    setRenamePageValue(activePage.name ?? DEFAULT_PAGE_NAME);
+                    setRenamePageOpen(true);
+                  }}
+                  disabled={!canWrite}
                   className="min-w-0 flex-1 truncate rounded-lg px-2 py-1 text-left text-xs font-semibold hover:bg-black/10 dark:hover:bg-white/10"
                   title={activePage?.name ?? DEFAULT_PAGE_NAME}
                 >
@@ -1578,6 +1616,41 @@ export default function ExcalidrawEditor({
                 </button>
                 <button type="button" className="w-full rounded-xl bg-black/5 px-3 py-2 text-left text-sm font-semibold hover:bg-black/10 dark:bg-white/10 dark:hover:bg-white/15" onClick={() => void runPdfExport("all")}>
                   Export all note pages
+                </button>
+              </div>
+            </div>
+          </div>
+        ) : null}
+
+        {renamePageOpen ? (
+          <div className="pointer-events-auto fixed inset-0 flex items-center justify-center p-6">
+            <div className="absolute inset-0 bg-black/55 backdrop-blur-sm" onClick={() => setRenamePageOpen(false)} aria-hidden />
+            <div className="relative w-full max-w-sm rounded-3xl border border-white/20 bg-[color-mix(in_srgb,var(--bg-surface)_95%,transparent)] p-6 shadow-2xl backdrop-blur-xl">
+              <h3 className="text-base font-semibold">Rename page</h3>
+              <input
+                autoFocus
+                value={renamePageValue}
+                onChange={(e) => setRenamePageValue(e.target.value)}
+                onKeyDown={(e) => {
+                  if (e.key === "Enter") {
+                    e.preventDefault();
+                    onRenamePage();
+                  }
+                }}
+                className="mt-3 w-full rounded-xl border border-white/20 bg-transparent px-3 py-2 text-sm outline-none focus:border-[var(--color-accent)]"
+                placeholder="Page name"
+              />
+              <div className="mt-4 flex justify-end gap-2">
+                <button type="button" className="rounded-xl px-3 py-1.5 text-sm font-semibold hover:bg-black/5 dark:hover:bg-white/10" onClick={() => setRenamePageOpen(false)}>
+                  Cancel
+                </button>
+                <button
+                  type="button"
+                  className="rounded-xl bg-[var(--color-accent)] px-3 py-1.5 text-sm font-semibold text-white disabled:opacity-50"
+                  disabled={!renamePageValue.trim()}
+                  onClick={onRenamePage}
+                >
+                  Save
                 </button>
               </div>
             </div>

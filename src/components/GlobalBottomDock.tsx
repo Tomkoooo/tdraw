@@ -14,6 +14,8 @@ export default function GlobalBottomDock() {
   const { setOpen: openCalculator } = useCalculator();
   const [fabOpen, setFabOpen] = useState(false);
   const [fabBusy, setFabBusy] = useState(false);
+  const [newNoteOpen, setNewNoteOpen] = useState(false);
+  const [newNoteName, setNewNoteName] = useState("");
 
   const isDashboardRoot = pathname === "/dashboard";
 
@@ -83,17 +85,9 @@ export default function GlobalBottomDock() {
                     type="button"
                     disabled={fabBusy}
                     className="flex min-h-[52px] w-full items-center gap-3 px-4 py-3 text-left text-sm font-semibold hover:bg-black/5 dark:hover:bg-white/10 disabled:opacity-50"
-                    onClick={async () => {
-                      setFabBusy(true);
-                      try {
-                        const id = await createSheet();
-                        setFabOpen(false);
-                        router.push(`/sheet/${id}`);
-                      } catch (e) {
-                        toastActionError(e, { id: "dock-create-sheet" });
-                      } finally {
-                        setFabBusy(false);
-                      }
+                    onClick={() => {
+                      setFabOpen(false);
+                      setNewNoteOpen(true);
                     }}
                   >
                     {fabBusy ? <Loader2 className="h-4 w-4 animate-spin" /> : <Plus className="h-4 w-4" />}
@@ -110,6 +104,70 @@ export default function GlobalBottomDock() {
             >
               <Plus className="h-8 w-8" strokeWidth={2.5} />
             </button>
+            {newNoteOpen ? (
+              <div className="pointer-events-auto fixed inset-0 z-[120] flex items-center justify-center bg-black/55 p-4">
+                <div className="glass-menu w-full max-w-sm rounded-2xl p-4">
+                  <h3 className="text-lg font-bold">New note</h3>
+                  <input
+                    autoFocus
+                    className="input-field mt-3 w-full rounded-xl px-3 py-2"
+                    value={newNoteName}
+                    onChange={(e) => setNewNoteName(e.target.value)}
+                    placeholder="Note name"
+                    onKeyDown={(e) => {
+                      if (e.key !== "Enter" || fabBusy) return;
+                      e.preventDefault();
+                      void (async () => {
+                        setFabBusy(true);
+                        try {
+                          const id = await createSheet({ title: newNoteName });
+                          setNewNoteOpen(false);
+                          setNewNoteName("");
+                          router.push(`/sheet/${id}`);
+                        } catch (err) {
+                          toastActionError(err, { id: "dock-create-sheet" });
+                        } finally {
+                          setFabBusy(false);
+                        }
+                      })();
+                    }}
+                  />
+                  <div className="mt-3 flex justify-end gap-2">
+                    <button
+                      type="button"
+                      className="px-3 py-1"
+                      disabled={fabBusy}
+                      onClick={() => {
+                        setNewNoteOpen(false);
+                        setNewNoteName("");
+                      }}
+                    >
+                      Cancel
+                    </button>
+                    <button
+                      type="button"
+                      className="rounded-xl bg-[var(--color-accent)] px-3 py-1.5 text-white disabled:opacity-50"
+                      disabled={fabBusy}
+                      onClick={async () => {
+                        setFabBusy(true);
+                        try {
+                          const id = await createSheet({ title: newNoteName });
+                          setNewNoteOpen(false);
+                          setNewNoteName("");
+                          router.push(`/sheet/${id}`);
+                        } catch (err) {
+                          toastActionError(err, { id: "dock-create-sheet" });
+                        } finally {
+                          setFabBusy(false);
+                        }
+                      }}
+                    >
+                      Create
+                    </button>
+                  </div>
+                </div>
+              </div>
+            ) : null}
           </div>
         )}
       </div>

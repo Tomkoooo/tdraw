@@ -77,7 +77,7 @@ function mapDriveSheet(sheet: {
   };
 }
 
-export async function createSheet(opts?: { folderId?: string; organizationId?: string }) {
+export async function createSheet(opts?: { folderId?: string; organizationId?: string; title?: string }) {
   const session = await auth();
   if (!session?.user?.id) throw new Error("Unauthorized");
 
@@ -128,9 +128,10 @@ export async function createSheet(opts?: { folderId?: string; organizationId?: s
   const last = await Sheet.findOne(maxSortQuery).sort({ sortIndex: -1 }).select("sortIndex").lean();
   const sortIndex = typeof last?.sortIndex === "number" ? last.sortIndex + 1 : 0;
 
+  const normalizedTitle = typeof opts?.title === "string" ? opts.title.trim().slice(0, 120) : "";
   const newSheet = await Sheet.create({
     userId: session.user.id,
-    title: "Untitled Note",
+    title: normalizedTitle.length > 0 ? normalizedTitle : "Untitled Note",
     canvasState: {},
     folderId: opts?.folderId ? new mongoose.Types.ObjectId(opts.folderId) : undefined,
     organizationId,

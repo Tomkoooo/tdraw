@@ -15,6 +15,7 @@ import {
   restoreSheetFromTrash,
   bulkSetSheetPinned,
   bulkMoveSheetsToTrash,
+  updateSheetTitle,
 } from "@/lib/actions/sheet";
 import { toastActionError, toastActionSuccess } from "@/lib/client/actionFeedback";
 import UserAvatar from "@/components/UserAvatar";
@@ -151,6 +152,9 @@ export default function LibraryShellView(v: LibraryShellViewProps) {
   const [renFolder, setRenFolder] = useState<FolderTreeEntry | null>(null);
   const [renFolderV, setRenFolderV] = useState("");
   const [bulkTrashIds, setBulkTrash] = useState<string[] | null>(null);
+  const [newNoteOpen, setNewNoteOpen] = useState(false);
+  const [newNoteName, setNewNoteName] = useState("");
+  const [newNoteBusy, setNewNoteBusy] = useState(false);
 
   const pRows = useMemo(() => toRows(v.pTree), [v.pTree]);
   const orgRows = useMemo(() => (v.curOrgTree ? toRows(v.curOrgTree) : []), [v.curOrgTree]);
@@ -255,6 +259,11 @@ export default function LibraryShellView(v: LibraryShellViewProps) {
   };
 
   const isOwnSheet = (s: SheetCard) => s.userId == null || s.userId === p.userId;
+  const canRenameSheet = (s: SheetCard) => {
+    if (isOwnSheet(s)) return true;
+    const role = (s as SheetCard & { role?: unknown }).role;
+    return role === "editor" || role === "author" || role === "owner";
+  };
 
   const docSheetIds = useMemo(() => notesInView.map((n) => n._id), [notesInView]);
 
@@ -431,17 +440,7 @@ export default function LibraryShellView(v: LibraryShellViewProps) {
                     <div className="flex flex-wrap items-center gap-2">
                       <button
                         type="button"
-                        onClick={async () => {
-                          try {
-                            const id =
-                              v.node === "org" && v.orgId
-                                ? await createSheet({ organizationId: v.orgId, folderId: v.folderId ?? undefined })
-                                : await createSheet({ folderId: v.folderId && (v.node === "drive" || (v.node === "org" && v.orgId)) ? v.folderId : undefined });
-                            router.push(`/sheet/${id}`);
-                          } catch (e) {
-                            toastActionError(e, { id: "new-note" });
-                          }
-                        }}
+                        onClick={() => setNewNoteOpen(true)}
                         className="inline-flex min-h-10 items-center gap-1.5 rounded-xl bg-[var(--color-accent)] px-3 text-xs font-bold text-white"
                       >
                         <Pencil className="h-3.5 w-3.5" />
@@ -722,6 +721,19 @@ export default function LibraryShellView(v: LibraryShellViewProps) {
               >
                 Information
               </button>
+              {v.node !== "trash" && canRenameSheet(v.ctx.sheet) ? (
+                <button
+                  type="button"
+                  className="w-full px-2 py-1.5 text-left text-sm"
+                  onClick={() => {
+                    v.setRen(v.ctx!.sheet!._id);
+                    v.setRenV(v.ctx!.sheet!.title ?? "");
+                    v.setCtx(null);
+                  }}
+                >
+                  Rename
+                </button>
+              ) : null}
               {v.ctx.sheet.userId == null || v.ctx.sheet.userId === p.userId ? (
                 <button
                   type="button"
@@ -883,6 +895,82 @@ export default function LibraryShellView(v: LibraryShellViewProps) {
           </div>
         </div>
       ) : null}
+      {newNoteOpen ? (
+        <div className="fixed inset-0 z-[210] flex items-center justify-center bg-black/50 p-4" role="dialog">
+          <div className="glass-menu w-full max-w-sm rounded-2xl p-4">
+            <h3 className="text-lg font-bold">New note</h3>
+            <input
+              autoFocus
+              className="input-field mt-3 w-full rounded-xl px-3 py-2"
+              value={newNoteName}
+              onChange={(e) => setNewNoteName(e.target.value)}
+              placeholder="Note name"
+              onKeyDown={(e) => {
+                if (e.key !== "Enter" || newNoteBusy) return;
+                e.preventDefault();
+                void (async () => {
+                  setNewNoteBusy(true);
+                  try {
+                    const id =
+                      v.node === "org" && v.orgId
+                        ? await createSheet({ organizationId: v.orgId, folderId: v.folderId ?? undefined, title: newNoteName })
+                        : await createSheet({
+                            folderId: v.folderId && (v.node === "drive" || (v.node === "org" && v.orgId)) ? v.folderId : undefined,
+                            title: newNoteName,
+                          });
+                    setNewNoteOpen(false);
+                    setNewNoteName("");
+                    router.push(`/sheet/${id}`);
+                  } catch (err) {
+                    toastActionError(err, { id: "new-note" });
+                  } finally {
+                    setNewNoteBusy(false);
+                  }
+                })();
+              }}
+            />
+            <div className="mt-3 flex justify-end gap-2">
+              <button
+                type="button"
+                className="px-3 py-1"
+                onClick={() => {
+                  setNewNoteOpen(false);
+                  setNewNoteName("");
+                }}
+                disabled={newNoteBusy}
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                className="rounded-xl bg-[var(--color-accent)] px-3 py-1.5 text-white disabled:opacity-50"
+                disabled={newNoteBusy}
+                onClick={async () => {
+                  setNewNoteBusy(true);
+                  try {
+                    const id =
+                      v.node === "org" && v.orgId
+                        ? await createSheet({ organizationId: v.orgId, folderId: v.folderId ?? undefined, title: newNoteName })
+                        : await createSheet({
+                            folderId: v.folderId && (v.node === "drive" || (v.node === "org" && v.orgId)) ? v.folderId : undefined,
+                            title: newNoteName,
+                          });
+                    setNewNoteOpen(false);
+                    setNewNoteName("");
+                    router.push(`/sheet/${id}`);
+                  } catch (err) {
+                    toastActionError(err, { id: "new-note" });
+                  } finally {
+                    setNewNoteBusy(false);
+                  }
+                }}
+              >
+                Create
+              </button>
+            </div>
+          </div>
+        </div>
+      ) : null}
       {renFolder ? (
         <div className="fixed inset-0 z-[210] flex items-center justify-center bg-black/50 p-4">
           <div className="glass-menu w-full max-w-sm rounded-2xl p-4">
@@ -906,6 +994,56 @@ export default function LibraryShellView(v: LibraryShellViewProps) {
                     router.refresh();
                   } catch (e) {
                     toastActionError(e, { id: "rnf" });
+                  }
+                }}
+              >
+                Save
+              </button>
+            </div>
+          </div>
+        </div>
+      ) : null}
+      {v.rename ? (
+        <div className="fixed inset-0 z-[210] flex items-center justify-center bg-black/50 p-4">
+          <div className="glass-menu w-full max-w-sm rounded-2xl p-4">
+            <h3 className="text-lg font-bold">Rename note</h3>
+            <input
+              autoFocus
+              className="input-field mt-3 w-full"
+              value={v.renameV}
+              onChange={(e) => v.setRenV(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key !== "Enter") return;
+                e.preventDefault();
+                void (async () => {
+                  try {
+                    await updateSheetTitle(v.rename!, v.renameV);
+                    v.setRen(null);
+                    v.setRenV("");
+                    router.refresh();
+                  } catch (err) {
+                    toastActionError(err, { id: "rename-note" });
+                  }
+                })();
+              }}
+            />
+            <div className="mt-3 flex justify-end gap-2">
+              <button type="button" onClick={() => (v.setRen(null), v.setRenV(""))}>
+                Cancel
+              </button>
+              <button
+                type="button"
+                className="bg-[var(--color-accent)] px-3 text-white"
+                onClick={async () => {
+                  const sheetId = v.rename;
+                  if (!sheetId) return;
+                  try {
+                    await updateSheetTitle(sheetId, v.renameV);
+                    v.setRen(null);
+                    v.setRenV("");
+                    router.refresh();
+                  } catch (err) {
+                    toastActionError(err, { id: "rename-note" });
                   }
                 }}
               >
