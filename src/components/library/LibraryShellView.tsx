@@ -10,6 +10,7 @@ import { CalendarDays, CheckSquare, LayoutGrid, List, MoreHorizontal, Pencil, Se
 import { createFolder, permanentlyDeleteFolder, restoreFolderFromTrash, renameFolder } from "@/lib/actions/folder";
 import {
   createSheet,
+  moveSheetToFolder,
   moveSheetToTrash,
   permanentlyDeleteSheet,
   restoreSheetFromTrash,
@@ -155,6 +156,7 @@ export default function LibraryShellView(v: LibraryShellViewProps) {
   const [newNoteOpen, setNewNoteOpen] = useState(false);
   const [newNoteName, setNewNoteName] = useState("");
   const [newNoteBusy, setNewNoteBusy] = useState(false);
+  const [moveToOrgSheet, setMoveToOrgSheet] = useState<SheetCard | null>(null);
 
   const pRows = useMemo(() => toRows(v.pTree), [v.pTree]);
   const orgRows = useMemo(() => (v.curOrgTree ? toRows(v.curOrgTree) : []), [v.curOrgTree]);
@@ -449,7 +451,10 @@ export default function LibraryShellView(v: LibraryShellViewProps) {
                       {v.node === "drive" || (v.node === "org" && v.orgId) ? (
                         <button
                           type="button"
-                          onClick={() => v.setSp({ newFolder: "1" })}
+                          onClick={() => {
+                            v.setNewFolderName("");
+                            v.setFolderCreate(true);
+                          }}
                           className="inline-flex min-h-10 items-center gap-1.5 rounded-xl border border-white/20 bg-black/[0.03] px-3 text-xs font-bold dark:bg-white/[0.06]"
                         >
                           <Sparkles className="h-3.5 w-3.5" />
@@ -712,6 +717,18 @@ export default function LibraryShellView(v: LibraryShellViewProps) {
                   onClick={() => (setMoveTo({ itemKind: "sheet", sheetIds: [v.ctx!.sheet!._id], movingFolderId: null }), v.setCtx(null))}
                 >
                   Move…
+                </button>
+              ) : null}
+              {isOwnSheet(v.ctx.sheet) && !v.ctx.sheet.organizationId && v.node !== "trash" && p.orgs.length > 0 ? (
+                <button
+                  type="button"
+                  className="w-full px-2 py-1.5 text-left text-sm"
+                  onClick={() => {
+                    setMoveToOrgSheet(v.ctx!.sheet!);
+                    v.setCtx(null);
+                  }}
+                >
+                  Move to organization…
                 </button>
               ) : null}
               <button
@@ -1048,6 +1065,39 @@ export default function LibraryShellView(v: LibraryShellViewProps) {
                 }}
               >
                 Save
+              </button>
+            </div>
+          </div>
+        </div>
+      ) : null}
+      {moveToOrgSheet ? (
+        <div className="fixed inset-0 z-[210] flex items-center justify-center bg-black/50 p-4">
+          <div className="glass-menu w-full max-w-md rounded-2xl p-4">
+            <h3 className="text-lg font-bold">Move to organization</h3>
+            <p className="mt-1 text-sm text-gray-500">Select the organization for “{moveToOrgSheet.title}”.</p>
+            <div className="mt-3 space-y-2">
+              {p.orgs.map((org) => (
+                <button
+                  key={org._id}
+                  type="button"
+                  className="w-full rounded-xl border border-white/15 px-3 py-2 text-left text-sm font-semibold hover:bg-black/5 dark:hover:bg-white/10"
+                  onClick={async () => {
+                    try {
+                      await moveSheetToFolder(moveToOrgSheet._id, null, org._id);
+                      setMoveToOrgSheet(null);
+                      router.refresh();
+                    } catch (err) {
+                      toastActionError(err, { id: "move-note-org" });
+                    }
+                  }}
+                >
+                  {org.name}
+                </button>
+              ))}
+            </div>
+            <div className="mt-4 flex justify-end">
+              <button type="button" className="rounded-xl px-3 py-1.5 text-sm font-semibold hover:bg-black/5 dark:hover:bg-white/10" onClick={() => setMoveToOrgSheet(null)}>
+                Cancel
               </button>
             </div>
           </div>

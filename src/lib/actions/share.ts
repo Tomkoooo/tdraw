@@ -152,6 +152,7 @@ export async function acceptSheetInviteByToken(rawToken: string) {
 
   const sid = String(inv.sheetId);
   revalidatePath("/dashboard");
+  revalidatePath("/", "layout");
   revalidatePath(`/sheet/${sid}`);
   return { sheetId: sid };
 }

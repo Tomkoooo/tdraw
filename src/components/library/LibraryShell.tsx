@@ -107,6 +107,7 @@ export default function LibraryShell(p: LibraryShellProps) {
         else u.searchParams.set(k, v);
       }
       router.replace(u.pathname + (u.search ? `?${u.searchParams.toString()}` : ""), { scroll: false });
+      router.refresh();
     },
     [router]
   );
@@ -195,12 +196,25 @@ export default function LibraryShell(p: LibraryShellProps) {
   const showRootDrop = dndMode === "personal" || dndMode === "org";
 
   const homeRows = useMemo(() => {
-    const t = mine.slice().sort((a, b) => {
+    const all = new Map<string, SheetCard>();
+    for (const s of mine) all.set(s._id, s);
+    for (const list of Object.values(p.orgSheetsByOrg)) {
+      for (const s of list) {
+        if (!all.has(s._id)) all.set(s._id, s);
+      }
+    }
+    for (const s of p.shared) {
+      if (!all.has(s._id)) all.set(s._id, s);
+    }
+    for (const s of p.sharedByMe) {
+      if (!all.has(s._id)) all.set(s._id, s);
+    }
+    const t = Array.from(all.values()).sort((a, b) => {
       if ((b.pinned ? 1 : 0) - (a.pinned ? 1 : 0)) return (b.pinned ? 1 : 0) - (a.pinned ? 1 : 0);
       return recentKey(b, visits) - recentKey(a, visits);
     });
     return t.slice(0, RECENT_CAP);
-  }, [mine, visits]);
+  }, [mine, p.orgSheetsByOrg, p.shared, p.sharedByMe, visits]);
 
   const drNotes = useMemo(() => {
     if (node === "drive" && !orgId) {

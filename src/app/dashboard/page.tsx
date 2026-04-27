@@ -13,6 +13,7 @@ import { listMyOrganizations } from "@/lib/actions/org";
 import { getFolderTree, getTrashedFoldersPersonal } from "@/lib/actions/folder";
 import { getPersonalDriveStorage, getOrganizationDriveStorage } from "@/lib/actions/storage";
 import LibraryShell from "@/components/library/LibraryShell";
+import { unstable_noStore as noStore } from "next/cache";
 
 export const dynamic = "force-dynamic";
 
@@ -25,6 +26,7 @@ type Search = {
 };
 
 export default async function Dashboard({ searchParams }: { searchParams: Promise<Search> }) {
+  noStore();
   const session = await auth();
   const sp = (await searchParams) ?? {};
   const orgs = await listMyOrganizations();

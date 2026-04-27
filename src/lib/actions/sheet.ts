@@ -5,6 +5,7 @@ import dbConnect from "@/lib/db/mongoose";
 import mongoose from "mongoose";
 import Sheet from "@/lib/models/Sheet";
 import SheetGrant from "@/lib/models/SheetGrant";
+import SheetInvitation from "@/lib/models/SheetInvitation";
 import Folder from "@/lib/models/Folder";
 import Organization from "@/lib/models/Organization";
 import User from "@/lib/models/User";
@@ -260,12 +261,34 @@ export async function getSharedWithMeSheets() {
   if (!session?.user?.id) throw new Error("Unauthorized");
 
   await dbConnect();
+  const uid = new mongoose.Types.ObjectId(session.user.id);
   const grants = await SheetGrant.find({
-    granteeUserId: new mongoose.Types.ObjectId(session.user.id),
+    granteeUserId: uid,
     via: "share",
   }).lean();
 
-  const ids = grants.map((g) => g.sheetId);
+  const roleBySheet = new Map(grants.map((g) => [String(g.sheetId), g.role]));
+  const idSet = new Set<string>(grants.map((g) => String(g.sheetId)));
+
+  /** Fallback: accepted email invites should always surface even if grant sync lagged. */
+  const email = session.user?.email?.trim().toLowerCase();
+  if (email) {
+    const acceptedInv = await SheetInvitation.find({
+      email,
+      acceptedAt: { $exists: true, $ne: null },
+      acceptedByUserId: uid,
+    })
+      .select("sheetId role")
+      .lean();
+    for (const inv of acceptedInv) {
+      const sid = String(inv.sheetId);
+      const invRole = typeof inv.role === "string" ? inv.role : "reader";
+      if (!idSet.has(sid)) idSet.add(sid);
+      if (!roleBySheet.has(sid)) roleBySheet.set(sid, invRole);
+    }
+  }
+
+  const ids = [...idSet].map((s) => new mongoose.Types.ObjectId(s));
   if (ids.length === 0) return [];
 
   const sheets = await Sheet.find({
@@ -274,7 +297,6 @@ export async function getSharedWithMeSheets() {
   })
     .sort({ updatedAt: -1 })
     .lean();
-  const roleBySheet = new Map(grants.map((g) => [String(g.sheetId), g.role]));
 
   return sheets.map((sheet) => ({
     ...mapDriveSheet(sheet),
@@ -381,6 +403,7 @@ export async function updateSheetTitle(id: string, title: string) {
   if (!res) throw new Error("Not found");
 
   revalidatePath("/dashboard");
+  revalidatePath("/", "layout");
   revalidatePath(`/sheet/${id}`);
   return { title: nextTitle };
 }
@@ -582,11 +605,13 @@ export async function saveSheetState(
     approxBytes,
     lastSavedByUserId: new mongoose.Types.ObjectId(session.user.id),
   });
+  revalidatePath(`/sheet/${id}`);
+  revalidatePath("/dashboard");
 
   return { success: true as const, contentVersion: nextVersion };
 }
 
-export async function moveSheetToFolder(sheetId: string, folderId: string | null) {
+export async function moveSheetToFolder(sheetId: string, folderId: string | null, targetOrganizationId?: string | null) {
   const session = await auth();
   if (!session?.user?.id) throw new Error("Unauthorized");
   await dbConnect();
@@ -596,21 +621,31 @@ export async function moveSheetToFolder(sheetId: string, folderId: string | null
   if (String(sheet.userId) !== session.user.id) throw new Error("Forbidden");
   if (sheet.deletedAt) throw new Error("Restore from trash first");
 
+  let targetOrgId: mongoose.Types.ObjectId | null = null;
   if (folderId) {
     const folder = await Folder.findOne({ _id: folderId, ...LIVE_FOLDER }).lean();
     if (!folder) throw new Error("Folder not found");
-    if (sheet.organizationId) {
-      if (String(folder.organizationId) !== String(sheet.organizationId)) throw new Error("Invalid folder");
-    } else {
-      if (String(folder.ownerUserId) !== session.user.id) throw new Error("Invalid folder");
+    const folderOrgId = folder.organizationId ? String(folder.organizationId) : null;
+    if (folderOrgId) {
+      await requireOrgMember(session.user.id, folderOrgId);
+      targetOrgId = new mongoose.Types.ObjectId(folderOrgId);
+    } else if (!folder.ownerUserId || String(folder.ownerUserId) !== session.user.id) {
+      throw new Error("Invalid folder");
     }
+  } else if (targetOrganizationId) {
+    await requireOrgMember(session.user.id, targetOrganizationId);
+    targetOrgId = new mongoose.Types.ObjectId(targetOrganizationId);
   }
 
   await Sheet.updateOne(
     { _id: sheetId, userId: session.user.id },
-    { folderId: folderId ? new mongoose.Types.ObjectId(folderId) : undefined }
+    {
+      folderId: folderId ? new mongoose.Types.ObjectId(folderId) : undefined,
+      organizationId: targetOrgId ?? undefined,
+    }
   );
   revalidatePath("/dashboard");
+  revalidatePath(`/sheet/${sheetId}`);
 }
 
 export async function bulkMoveSheets(sheetIds: string[], folderId: string | null) {

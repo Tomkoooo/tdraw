@@ -248,12 +248,25 @@ export function attachSocketIo(io: Server): void {
       socket.data.docActivity = undefined;
     });
 
-    socket.on("presence:cursor", (payload: { sheetId?: string; pageId?: string; x?: number; y?: number }) => {
-      const { sheetId, pageId, x, y } = payload || {};
-      if (!sheetId || socket.data.activeSheet !== sheetId) return;
-      const fromSocketId = socket.id;
-      socket.to(`sheet:${sheetId}`).emit("presence:cursor", { userId, name, color, image, pageId, x, y, fromSocketId });
-    });
+    socket.on(
+      "presence:cursor",
+      (payload: { sheetId?: string; pageId?: string; x?: number; y?: number; laser?: boolean }) => {
+        const { sheetId, pageId, x, y, laser } = payload || {};
+        if (!sheetId || socket.data.activeSheet !== sheetId) return;
+        const fromSocketId = socket.id;
+        socket.to(`sheet:${sheetId}`).emit("presence:cursor", {
+          userId,
+          name,
+          color,
+          image,
+          pageId,
+          x,
+          y,
+          fromSocketId,
+          laser: Boolean(laser),
+        });
+      },
+    );
 
     socket.on("sheet:scene", (payload: { sheetId?: string; pageId?: string; elements?: unknown; files?: unknown }) => {
       const { sheetId, pageId, elements, files } = payload || {};

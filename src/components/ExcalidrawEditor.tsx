@@ -5,7 +5,7 @@ import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { io, type Socket } from "socket.io-client";
 import localforage from "localforage";
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { toast } from "sonner";
 import { sceneCoordsToViewportCoords, viewportCoordsToSceneCoords } from "@excalidraw/excalidraw";
 import {
@@ -106,6 +106,8 @@ type RemoteCursor = {
   color: string;
   name: string;
   at: number;
+  laser?: boolean;
+  trail?: { x: number; y: number }[];
 };
 
 const queueKey = (sheetId: string) => `excalidraw-save-queue-${sheetId}`;
@@ -381,24 +383,41 @@ export default function ExcalidrawEditor({
   );
 
   const applyScene = useCallback(
-    (api: ExcalidrawImperativeApiLike, scene: { elements: Record<string, unknown>[]; files: SceneFile[]; appState?: Record<string, unknown> }) => {
+    (
+      api: ExcalidrawImperativeApiLike,
+      scene: { elements: Record<string, unknown>[]; files: SceneFile[]; appState?: Record<string, unknown> },
+      opts?: { preserveViewport?: boolean },
+    ) => {
       blockSyncRef.current = true;
       ignoreAutosaveUntilRef.current = Date.now() + 700;
       try {
         if (scene.files.length > 0) {
           api.addFiles(scene.files as Parameters<ExcalidrawImperativeApiLike["addFiles"]>[0]);
         }
+        const cur = api.getAppState() as unknown as Record<string, unknown>;
+        const preserveVp = opts?.preserveViewport === true;
+        const nextApp: Record<string, unknown> = {
+          ...(scene.appState ?? {}),
+          viewModeEnabled: !canWrite,
+          zenModeEnabled: false,
+          collaborators: new Map(),
+        };
+        if (preserveVp) {
+          nextApp.zoom = cur.zoom;
+          nextApp.scrollX = cur.scrollX;
+          nextApp.scrollY = cur.scrollY;
+          nextApp.width = cur.width;
+          nextApp.height = cur.height;
+          nextApp.offsetLeft = cur.offsetLeft;
+          nextApp.offsetTop = cur.offsetTop;
+        } else {
+          nextApp.zoom = { value: 1 };
+          nextApp.scrollX = 0;
+          nextApp.scrollY = 0;
+        }
         api.updateScene({
           elements: scene.elements as unknown as Parameters<ExcalidrawImperativeApiLike["updateScene"]>[0]["elements"],
-          appState: {
-            ...(scene.appState ?? {}),
-            viewModeEnabled: !canWrite,
-            zenModeEnabled: false,
-            zoom: { value: 1 },
-            scrollX: 0,
-            scrollY: 0,
-            collaborators: new Map(),
-          } as Parameters<ExcalidrawImperativeApiLike["updateScene"]>[0]["appState"],
+          appState: nextApp as Parameters<ExcalidrawImperativeApiLike["updateScene"]>[0]["appState"],
         });
         const currentTheme = api.getAppState().theme === "dark" ? "dark" : "light";
         setExcalidrawTheme((t) => (t === currentTheme ? t : currentTheme));
@@ -558,9 +577,53 @@ export default function ExcalidrawEditor({
   useEffect(() => {
     mountedRef.current = true;
     return () => {
+      if (saveDebounceRef.current) {
+        clearTimeout(saveDebounceRef.current);
+        saveDebounceRef.current = null;
+      }
+      if (canWrite && hasLocalUnsavedEditsRef.current) {
+        void flushSave(false);
+      }
       mountedRef.current = false;
     };
-  }, []);
+  }, [canWrite, flushSave]);
+
+  useEffect(() => {
+    if (!canWrite || typeof window === "undefined") return;
+
+    const flushNow = () => {
+      if (!hasLocalUnsavedEditsRef.current) return;
+      if (saveDebounceRef.current) {
+        clearTimeout(saveDebounceRef.current);
+        saveDebounceRef.current = null;
+      }
+      void flushSave(false);
+    };
+
+    const onBeforeUnload = (event: BeforeUnloadEvent) => {
+      if (!hasLocalUnsavedEditsRef.current) return;
+      flushNow();
+      event.preventDefault();
+      event.returnValue = "";
+    };
+
+    const onPageHide = () => {
+      flushNow();
+    };
+
+    const onVisibilityChange = () => {
+      if (document.visibilityState === "hidden") flushNow();
+    };
+
+    window.addEventListener("beforeunload", onBeforeUnload);
+    window.addEventListener("pagehide", onPageHide);
+    document.addEventListener("visibilitychange", onVisibilityChange);
+    return () => {
+      window.removeEventListener("beforeunload", onBeforeUnload);
+      window.removeEventListener("pagehide", onPageHide);
+      document.removeEventListener("visibilitychange", onVisibilityChange);
+    };
+  }, [canWrite, flushSave]);
 
   useEffect(() => {
     apiRef.current = null;
@@ -628,14 +691,17 @@ export default function ExcalidrawEditor({
       if (e.pointerType === "touch") return;
       const api = apiRef.current;
       const s = socketRef.current;
-      if (!api || !s?.connected || !canWrite) return;
+      if (!api || !s?.connected) return;
       const now = Date.now();
-      if (now - lastCursorEmitRef.current < 50) return;
+      const app = api.getAppState() as unknown as { activeTool?: { type?: string } };
+      const isLaser = app.activeTool?.type === "laser";
+      const minMs = isLaser ? 18 : 50;
+      if (now - lastCursorEmitRef.current < minMs) return;
       lastCursorEmitRef.current = now;
       const { x, y } = viewportCoordsToSceneCoords({ clientX: e.clientX, clientY: e.clientY }, pointerAppState(api));
-      s.emit("presence:cursor", { sheetId, pageId: activePageIdRef.current, x, y });
+      s.emit("presence:cursor", { sheetId, pageId: activePageIdRef.current, x, y, laser: isLaser });
     },
-    [canWrite, pointerAppState, sheetId],
+    [pointerAppState, sheetId],
   );
 
   const onExcalidrawChange = useCallback((elements: readonly unknown[], appState: unknown) => {
@@ -852,11 +918,15 @@ export default function ExcalidrawEditor({
             setDocumentState(parsedDoc);
             docStateRef.current = parsedDoc;
             setActivePageId(parsedDoc.activePageId);
-            applyScene(api, {
-              elements: remotePage?.elements ?? [],
-              appState: remotePage?.appState ?? {},
-              files: Object.values(parsedDoc.files),
-            });
+            applyScene(
+              api,
+              {
+                elements: remotePage?.elements ?? [],
+                appState: remotePage?.appState ?? {},
+                files: Object.values(parsedDoc.files),
+              },
+              { preserveViewport: true },
+            );
             versionRef.current = incomingVersion;
             void writeCachedDocument(sheetId, parsedDoc, incomingVersion);
             hasLocalUnsavedEditsRef.current = false;
@@ -886,11 +956,15 @@ export default function ExcalidrawEditor({
               const api = apiRef.current;
               if (!api) return;
               const page = docStateRef.current.pages.find((p) => p.id === pageId);
-              applyScene(api, {
-                elements: payload.elements as Record<string, unknown>[],
-                appState: page?.appState ?? {},
-                files: fileArr,
-              });
+              applyScene(
+                api,
+                {
+                  elements: payload.elements as Record<string, unknown>[],
+                  appState: page?.appState ?? {},
+                  files: fileArr,
+                },
+                { preserveViewport: true },
+              );
               setDocumentState((prev) => {
                 const mergedFiles = { ...prev.files, ...(filesRec ?? {}) };
                 const next: PersistedDocument = {
@@ -992,6 +1066,7 @@ export default function ExcalidrawEditor({
             y?: number;
             color?: string;
             name?: string;
+            laser?: boolean;
           }) => {
             if (!payload.fromSocketId || payload.fromSocketId === mySocketIdRef.current) return;
             if (typeof payload.x !== "number" || typeof payload.y !== "number") return;
@@ -999,17 +1074,26 @@ export default function ExcalidrawEditor({
             const rx = payload.x;
             const ry = payload.y;
             const fsid = payload.fromSocketId as string;
-            setRemoteCursors((prev) => ({
-              ...prev,
-              [fsid]: {
-                x: rx,
-                y: ry,
-                pageId: payload.pageId,
-                color: payload.color || "#0071E3",
-                name: payload.name || "User",
-                at: Date.now(),
-              },
-            }));
+            const laser = Boolean(payload.laser);
+            setRemoteCursors((prev) => {
+              const prior = prev[fsid];
+              const trail = laser
+                ? [...(prior?.trail ?? []), { x: rx, y: ry }].slice(-160)
+                : [];
+              return {
+                ...prev,
+                [fsid]: {
+                  x: rx,
+                  y: ry,
+                  pageId: payload.pageId,
+                  color: payload.color || "#0071E3",
+                  name: payload.name || "User",
+                  at: Date.now(),
+                  laser,
+                  trail,
+                },
+              };
+            });
             setCursorRerender((c) => c + 1);
           },
         );
@@ -1339,27 +1423,63 @@ export default function ExcalidrawEditor({
         <ExcalidrawCanvas excalidrawAPI={handleApiReady} onChange={onExcalidrawChange} viewModeEnabled={!canWrite} />
         {Object.keys(remoteCursors).length > 0 ? (
           <div key={cursorRerender} className="pointer-events-none absolute inset-0 z-10" aria-hidden>
-            {Object.entries(remoteCursors).map(([fromId, c]) => {
-              if (c.pageId && c.pageId !== activePageId) return null;
+            {(() => {
               const api = apiRef.current;
               if (!api) return null;
-              const { x, y } = sceneCoordsToViewportCoords({ sceneX: c.x, sceneY: c.y }, pointerAppState(api));
+              const ps = pointerAppState(api);
+              const trailPolylines: ReactNode[] = [];
+              for (const [fromId, c] of Object.entries(remoteCursors)) {
+                if (c.pageId && c.pageId !== activePageId) continue;
+                const pts = c.trail;
+                if (!pts || pts.length < 2) continue;
+                const flat = pts
+                  .map((p) => {
+                    const v = sceneCoordsToViewportCoords({ sceneX: p.x, sceneY: p.y }, ps);
+                    return `${v.x},${v.y}`;
+                  })
+                  .join(" ");
+                trailPolylines.push(
+                  <polyline
+                    key={`trail-${fromId}`}
+                    fill="none"
+                    stroke={c.color}
+                    strokeWidth={2.5}
+                    strokeLinecap="round"
+                    strokeLinejoin="round"
+                    opacity={0.9}
+                    points={flat}
+                  />,
+                );
+              }
               return (
-                <div
-                  key={fromId}
-                  className="absolute flex flex-col items-start"
-                  style={{ transform: `translate(${x}px, ${y}px)`, marginTop: -8, marginLeft: 4 }}
-                >
-                  <span
-                    className="h-2.5 w-2.5 rounded-full border border-white/80 shadow"
-                    style={{ backgroundColor: c.color }}
-                  />
-                  <span className="mt-0.5 max-w-[9rem] truncate rounded bg-black/60 px-1.5 py-0.5 text-[10px] font-semibold text-white">
-                    {c.name}
-                  </span>
-                </div>
+                <>
+                  {trailPolylines.length > 0 ? (
+                    <svg className="absolute inset-0 h-full w-full overflow-visible" aria-hidden>
+                      {trailPolylines}
+                    </svg>
+                  ) : null}
+                  {Object.entries(remoteCursors).map(([fromId, c]) => {
+                    if (c.pageId && c.pageId !== activePageId) return null;
+                    const { x, y } = sceneCoordsToViewportCoords({ sceneX: c.x, sceneY: c.y }, ps);
+                    return (
+                      <div
+                        key={fromId}
+                        className="absolute flex flex-col items-start"
+                        style={{ transform: `translate(${x}px, ${y}px)`, marginTop: -8, marginLeft: 4 }}
+                      >
+                        <span
+                          className="h-2.5 w-2.5 rounded-full border border-white/80 shadow"
+                          style={{ backgroundColor: c.color }}
+                        />
+                        <span className="mt-0.5 max-w-36 truncate rounded bg-black/60 px-1.5 py-0.5 text-[10px] font-semibold text-white">
+                          {c.name}
+                        </span>
+                      </div>
+                    );
+                  })}
+                </>
               );
-            })}
+            })()}
           </div>
         ) : null}
       </div>
