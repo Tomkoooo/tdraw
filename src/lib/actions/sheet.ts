@@ -13,6 +13,10 @@ import { revalidatePath } from "next/cache";
 import { requireSheetPermission, getEffectiveSheetAccess } from "@/lib/authz/sheet";
 import { requireOrgMember, requireOrgAdmin } from "@/lib/authz/org";
 import { roleMeets } from "@/lib/authz/types";
+import { effectiveFolderLevelForUser, effectiveSheetLevelForUser, folderAllowsRead, folderAllowsWrite } from "@/lib/authz/folder";
+import SheetAccess from "@/lib/models/SheetAccess";
+import type { FolderPermissionLevel } from "@/lib/models/FolderAccess";
+import type { OrgMemberRole } from "@/lib/models/Organization";
 
 /** Sheets not in trash (missing field counts as live for legacy docs). */
 const LIVE_SHEET = { $or: [{ deletedAt: null }, { deletedAt: { $exists: false } }] };
@@ -63,6 +67,8 @@ function mapDriveSheet(sheet: {
   userId?: unknown;
   pinned?: boolean;
   approxBytes?: number;
+  accessLevel?: FolderPermissionLevel | "owner_bypass";
+  canWriteByPolicy?: boolean;
 }) {
   return {
     _id: String(sheet._id),
@@ -75,6 +81,8 @@ function mapDriveSheet(sheet: {
     userId: sheet.userId ? String(sheet.userId) : undefined,
     pinned: !!sheet.pinned,
     approxBytes: typeof sheet.approxBytes === "number" ? sheet.approxBytes : 0,
+    accessLevel: (sheet.accessLevel as FolderPermissionLevel | "owner_bypass" | undefined) ?? undefined,
+    canWriteByPolicy: typeof sheet.canWriteByPolicy === "boolean" ? sheet.canWriteByPolicy : undefined,
   };
 }
 
@@ -97,6 +105,10 @@ export async function createSheet(opts?: { folderId?: string; organizationId?: s
       if (!folder.organizationId || String(folder.organizationId) !== String(organizationId)) {
         throw new Error("Invalid folder");
       }
+      const level = await effectiveFolderLevelForUser(session.user.id, opts.folderId, {
+        organizationId: String(organizationId),
+      });
+      if (!folderAllowsWrite(level)) throw new Error("Forbidden");
     } else {
       if (!folder.ownerUserId || String(folder.ownerUserId) !== session.user.id) {
         throw new Error("Invalid folder");
@@ -186,11 +198,12 @@ export async function getRootDriveSheets() {
 export async function getRootOrgSheets(organizationId: string) {
   const session = await auth();
   if (!session?.user?.id) throw new Error("Unauthorized");
+  const userId = session.user.id;
   await dbConnect();
-  await requireOrgMember(session.user.id, organizationId);
+  await requireOrgMember(userId, organizationId);
 
   const orgOid = new mongoose.Types.ObjectId(organizationId);
-  const sheets = await Sheet.find({
+  const raw = await Sheet.find({
     $and: [
       { organizationId: orgOid },
       ROOT_SHEET_FOLDER,
@@ -199,33 +212,59 @@ export async function getRootOrgSheets(organizationId: string) {
   })
     .sort({ pinned: -1, sortIndex: 1, updatedAt: -1 })
     .lean();
-
-  return sheets.map(mapDriveSheet);
+  const sheets = await Promise.all(
+    raw.map(async (s) => {
+      const lvl = await effectiveSheetLevelForUser(userId, String(s._id), {
+        organizationId,
+        folderId: null,
+      });
+      return {
+        ...s,
+        accessLevel: lvl,
+        canWriteByPolicy: folderAllowsWrite(lvl),
+      };
+    }),
+  );
+  return sheets.filter((s) => folderAllowsRead(s.accessLevel!)).map(mapDriveSheet);
 }
 
 export async function getFolderSheets(folderId: string) {
   const session = await auth();
   if (!session?.user?.id) throw new Error("Unauthorized");
+  const userId = session.user.id;
   await dbConnect();
 
   const f = await Folder.findOne({ _id: folderId, ...LIVE_FOLDER }).lean();
   if (!f) throw new Error("Folder not found");
   if (f.ownerUserId) {
-    if (String(f.ownerUserId) !== session.user.id) throw new Error("Forbidden");
+    if (String(f.ownerUserId) !== userId) throw new Error("Forbidden");
   } else if (f.organizationId) {
-    await requireOrgMember(session.user.id, String(f.organizationId));
+    await requireOrgMember(userId, String(f.organizationId));
   } else {
     throw new Error("Forbidden");
   }
 
   const folderOid = new mongoose.Types.ObjectId(folderId);
   if (f.organizationId) {
-    const sheets = await Sheet.find({
+    const raw = await Sheet.find({
       $and: [{ organizationId: f.organizationId }, { folderId: folderOid }, LIVE_SHEET],
     })
       .sort({ pinned: -1, sortIndex: 1, updatedAt: -1 })
       .lean();
-    return sheets.map(mapDriveSheet);
+    const sheets = await Promise.all(
+      raw.map(async (s) => {
+        const lvl = await effectiveSheetLevelForUser(userId, String(s._id), {
+          organizationId: String(f.organizationId),
+          folderId,
+        });
+        return {
+          ...s,
+          accessLevel: lvl,
+          canWriteByPolicy: folderAllowsWrite(lvl),
+        };
+      }),
+    );
+    return sheets.filter((s) => folderAllowsRead(s.accessLevel!)).map(mapDriveSheet);
   }
   const sheets = await Sheet.find({
     $and: [
@@ -243,17 +282,30 @@ export async function getFolderSheets(folderId: string) {
 export async function getOrgSheets(organizationId: string) {
   const session = await auth();
   if (!session?.user?.id) throw new Error("Unauthorized");
+  const userId = session.user.id;
   await dbConnect();
-  await requireOrgMember(session.user.id, organizationId);
+  await requireOrgMember(userId, organizationId);
 
-  const sheets = await Sheet.find({
+  const raw = await Sheet.find({
     organizationId: new mongoose.Types.ObjectId(organizationId),
     ...LIVE_SHEET,
   })
     .sort({ pinned: -1, sortIndex: 1, updatedAt: -1 })
     .lean();
-
-  return sheets.map(mapDriveSheet);
+  const sheets = await Promise.all(
+    raw.map(async (s) => {
+      const lvl = await effectiveSheetLevelForUser(userId, String(s._id), {
+        organizationId,
+        folderId: s.folderId ? String(s.folderId) : null,
+      });
+      return {
+        ...s,
+        accessLevel: lvl,
+        canWriteByPolicy: folderAllowsWrite(lvl),
+      };
+    }),
+  );
+  return sheets.filter((s) => folderAllowsRead(s.accessLevel!)).map(mapDriveSheet);
 }
 
 export async function getSharedWithMeSheets() {
@@ -628,6 +680,11 @@ export async function moveSheetToFolder(sheetId: string, folderId: string | null
     const folderOrgId = folder.organizationId ? String(folder.organizationId) : null;
     if (folderOrgId) {
       await requireOrgMember(session.user.id, folderOrgId);
+      const level = await effectiveSheetLevelForUser(session.user.id, sheetId, {
+        organizationId: folderOrgId,
+        folderId,
+      });
+      if (!folderAllowsWrite(level)) throw new Error("Forbidden");
       targetOrgId = new mongoose.Types.ObjectId(folderOrgId);
     } else if (!folder.ownerUserId || String(folder.ownerUserId) !== session.user.id) {
       throw new Error("Invalid folder");
@@ -767,4 +824,46 @@ export async function getSheetInfo(sheetId: string) {
     folderId: sheet.folderId ? String(sheet.folderId) : null,
     inTrash: !!sheet.deletedAt,
   };
+}
+
+export async function setOrgSheetUserAccess(
+  sheetId: string,
+  targetUserId: string,
+  level: FolderPermissionLevel,
+  organizationId: string
+) {
+  const session = await auth();
+  if (!session?.user?.id) throw new Error("Unauthorized");
+  await dbConnect();
+  await requireOrgAdmin(session.user.id, organizationId);
+
+  const sheet = await Sheet.findById(sheetId).lean();
+  if (!sheet || String(sheet.organizationId ?? "") !== organizationId) throw new Error("Invalid sheet");
+  await SheetAccess.findOneAndUpdate(
+    { sheetId: new mongoose.Types.ObjectId(sheetId), userId: new mongoose.Types.ObjectId(targetUserId) },
+    { $set: { level }, $unset: { role: "" } },
+    { upsert: true }
+  );
+  revalidatePath("/dashboard");
+}
+
+export async function setOrgSheetRoleAccess(
+  sheetId: string,
+  role: OrgMemberRole,
+  level: FolderPermissionLevel,
+  organizationId: string
+) {
+  const session = await auth();
+  if (!session?.user?.id) throw new Error("Unauthorized");
+  await dbConnect();
+  await requireOrgAdmin(session.user.id, organizationId);
+
+  const sheet = await Sheet.findById(sheetId).lean();
+  if (!sheet || String(sheet.organizationId ?? "") !== organizationId) throw new Error("Invalid sheet");
+  await SheetAccess.findOneAndUpdate(
+    { sheetId: new mongoose.Types.ObjectId(sheetId), role },
+    { $set: { level }, $unset: { userId: "" } },
+    { upsert: true }
+  );
+  revalidatePath("/dashboard");
 }

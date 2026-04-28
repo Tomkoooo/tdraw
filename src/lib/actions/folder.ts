@@ -8,6 +8,8 @@ import FolderAccess from "@/lib/models/FolderAccess";
 import Sheet from "@/lib/models/Sheet";
 import { requireOrgMember, requireOrgAdmin } from "@/lib/authz/org";
 import type { FolderPermissionLevel } from "@/lib/models/FolderAccess";
+import { effectiveFolderLevelForUser, folderAllowsRead, folderAllowsWrite } from "@/lib/authz/folder";
+import type { OrgMemberRole } from "@/lib/models/Organization";
 import { revalidatePath } from "next/cache";
 
 const LIVE_FOLDER = { $or: [{ deletedAt: null }, { deletedAt: { $exists: false } }] };
@@ -38,16 +40,25 @@ function mapFolder(f: {
 export async function listFolders(opts: { organizationId?: string; ownerPersonal?: boolean }) {
   const session = await auth();
   if (!session?.user?.id) throw new Error("Unauthorized");
+  const userId = session.user.id;
   await dbConnect();
 
   if (opts.organizationId) {
-    await requireOrgMember(session.user.id, opts.organizationId);
+    await requireOrgMember(userId, opts.organizationId);
     const folders = await Folder.find({
       $and: [{ organizationId: new mongoose.Types.ObjectId(opts.organizationId) }, LIVE_FOLDER],
     })
       .sort({ pinned: -1, order: 1, name: 1 })
       .lean();
-    return folders.map(mapFolder);
+    const withAccess = await Promise.all(
+      folders.map(async (f) => {
+        const level = await effectiveFolderLevelForUser(userId, String(f._id), {
+          organizationId: opts.organizationId!,
+        });
+        return { ...f, accessLevel: level };
+      }),
+    );
+    return withAccess.filter((f) => folderAllowsRead(f.accessLevel)).map(mapFolder);
   }
 
   if (opts.ownerPersonal) {
@@ -128,21 +139,29 @@ export async function getFolderTree(opts: { organizationId?: string; ownerPerson
     });
   }
 
-  return folders.map((f) => {
-    const list = (byFolder.get(String(f._id)) ?? [])
-      .slice()
-      .sort((a, b) => (b.updatedAt?.getTime() ?? 0) - (a.updatedAt?.getTime() ?? 0));
-    const last = list[0];
-    return {
-      ...mapFolder(f),
-      count: list.length,
-      lastActivity: last?.updatedAt ? new Date(last.updatedAt).toISOString() : null,
-      coverThumbs: list
-        .slice(0, 3)
-        .map((r) => (r.previewImage && r.previewImage.length > 0 ? r.previewImage : null))
-        .filter((p): p is string => p !== null),
-    };
-  });
+  const rows = await Promise.all(
+    folders.map(async (f) => {
+      const list = (byFolder.get(String(f._id)) ?? [])
+        .slice()
+        .sort((a, b) => (b.updatedAt?.getTime() ?? 0) - (a.updatedAt?.getTime() ?? 0));
+      const last = list[0];
+      const accessLevel = opts.organizationId
+        ? await effectiveFolderLevelForUser(userId, String(f._id), { organizationId: opts.organizationId })
+        : "owner_bypass";
+      return {
+        ...mapFolder(f),
+        accessLevel,
+        canWriteByPolicy: folderAllowsWrite(accessLevel),
+        count: list.length,
+        lastActivity: last?.updatedAt ? new Date(last.updatedAt).toISOString() : null,
+        coverThumbs: list
+          .slice(0, 3)
+          .map((r) => (r.previewImage && r.previewImage.length > 0 ? r.previewImage : null))
+          .filter((p): p is string => p !== null),
+      };
+    }),
+  );
+  return rows.filter((r) => folderAllowsRead(r.accessLevel));
 }
 
 function collectDescendantIds(folderId: string, byParent: Map<string | null, string[]>): Set<string> {
@@ -254,6 +273,12 @@ export async function createFolder(input: {
   if (input.organizationId) {
     await requireOrgMember(session.user.id, input.organizationId);
     if (input.parentFolderId) {
+      const parentLevel = await effectiveFolderLevelForUser(session.user.id, input.parentFolderId, {
+        organizationId: input.organizationId,
+      });
+      if (!folderAllowsWrite(parentLevel)) throw new Error("Forbidden");
+    }
+    if (input.parentFolderId) {
       const parent = await Folder.findOne({ _id: input.parentFolderId, ...LIVE_FOLDER }).lean();
       if (!parent || String(parent.organizationId) !== input.organizationId) throw new Error("Invalid parent");
     }
@@ -322,7 +347,10 @@ export async function renameFolder(folderId: string, name: string) {
     return;
   }
   if (f.organizationId) {
-    await requireOrgMember(session.user.id, String(f.organizationId));
+    const level = await effectiveFolderLevelForUser(session.user.id, String(f._id), {
+      organizationId: String(f.organizationId),
+    });
+    if (!folderAllowsWrite(level)) throw new Error("Forbidden");
     await Folder.updateOne({ _id: folderId }, { $set: { name: nm } });
     revalidatePath("/dashboard");
     return;
@@ -428,7 +456,29 @@ export async function setFolderAccess(
 
   await FolderAccess.findOneAndUpdate(
     { folderId: new mongoose.Types.ObjectId(folderId), userId: new mongoose.Types.ObjectId(targetUserId) },
-    { $set: { level } },
+    { $set: { level }, $unset: { role: "" } },
+    { upsert: true }
+  );
+  revalidatePath("/dashboard");
+}
+
+export async function setFolderRoleAccess(
+  folderId: string,
+  role: OrgMemberRole,
+  level: FolderPermissionLevel,
+  organizationId: string
+) {
+  const session = await auth();
+  if (!session?.user?.id) throw new Error("Unauthorized");
+  await dbConnect();
+  await requireOrgAdmin(session.user.id, organizationId);
+
+  const folder = await Folder.findById(folderId).lean();
+  if (!folder || String(folder.organizationId) !== organizationId) throw new Error("Invalid folder");
+
+  await FolderAccess.findOneAndUpdate(
+    { folderId: new mongoose.Types.ObjectId(folderId), role },
+    { $set: { level }, $unset: { userId: "" } },
     { upsert: true }
   );
   revalidatePath("/dashboard");

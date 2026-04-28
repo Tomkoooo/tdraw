@@ -132,7 +132,7 @@ export default function LibraryShell(p: LibraryShellProps) {
   const [confirm, setC] = useState<null | { t: "sheet" | "folder"; id: string; n: string }>(null);
   const [ctx, setCtx] = useState<Ctx | null>(null);
   const [activeDrag, setActive] = useState<SheetCard | null>(null);
-  const [, setOrgOnline] = useState<OnlineMember[]>([]);
+  const [orgOnline, setOrgOnline] = useState<OnlineMember[]>([]);
   const [, setOrgAct] = useState<Record<string, DocEditActivity | null>>({});
   const [docPresence, setDocPresence] = useState<DocPresenceMap>({});
 
@@ -391,6 +391,7 @@ export default function LibraryShell(p: LibraryShellProps) {
       setOrgAct={setOrgAct}
       docPresence={docPresence}
       setDocPresence={setDocPresence}
+      orgOnline={orgOnline}
     />
   );
 }

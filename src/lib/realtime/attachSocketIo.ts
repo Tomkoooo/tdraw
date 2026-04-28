@@ -123,7 +123,17 @@ export function attachSocketIo(io: Server): void {
         socket.join(`org:${organizationId}`);
         if (!socket.data.orgRooms) socket.data.orgRooms = new Set<string>();
         (socket.data.orgRooms as Set<string>).add(organizationId);
-        io.to(`org:${organizationId}`).emit("org:presence", { userId, name, image, joined: true });
+        const peers = await io.in(`org:${organizationId}`).fetchSockets();
+        const others = peers
+          .filter((s) => s.id !== socket.id)
+          .map((s) => ({
+            userId: String(s.data.userId ?? ""),
+            name: (s.handshake.auth?.name as string) || "User",
+            image: typeof s.handshake.auth?.image === "string" ? s.handshake.auth.image : "",
+          }))
+          .filter((r) => r.userId.length > 0);
+        if (others.length > 0) socket.emit("org:presenceSync", { members: others });
+        socket.to(`org:${organizationId}`).emit("org:presence", { userId, name, image, joined: true });
         ack?.({ ok: true });
       } catch (e) {
         ack?.({ ok: false, error: String((e as Error)?.message || e) });
@@ -174,7 +184,21 @@ export function attachSocketIo(io: Server): void {
         socket.join(`sheet:${sheetId}`);
         socket.data.activeSheet = sheetId;
         const fromSocketId = socket.id;
-        io.to(`sheet:${sheetId}`).emit("presence:list", { userId, name, color, image, joined: true, fromSocketId });
+        const peers = await io.in(`sheet:${sheetId}`).fetchSockets();
+        const others = peers
+          .filter((s) => s.id !== fromSocketId)
+          .map((s) => ({
+            userId: String(s.data.userId ?? ""),
+            name: (s.handshake.auth?.name as string) || "User",
+            color: (s.handshake.auth?.color as string) || "#0071E3",
+            image: typeof s.handshake.auth?.image === "string" ? s.handshake.auth.image : "",
+            fromSocketId: s.id,
+          }))
+          .filter((r) => r.userId.length > 0);
+        if (others.length > 0) {
+          socket.emit("presence:sync", { members: others });
+        }
+        socket.to(`sheet:${sheetId}`).emit("presence:list", { userId, name, color, image, joined: true, fromSocketId });
 
         const Sheet = mongoose.models.RTSheet || mongoose.model("RTSheet", SheetSchema);
         const sheet = await Sheet.findById(sheetId).select("organizationId title").lean();
@@ -254,7 +278,7 @@ export function attachSocketIo(io: Server): void {
         const { sheetId, pageId, x, y, laser } = payload || {};
         if (!sheetId || socket.data.activeSheet !== sheetId) return;
         const fromSocketId = socket.id;
-        socket.to(`sheet:${sheetId}`).emit("presence:cursor", {
+        socket.volatile.to(`sheet:${sheetId}`).emit("presence:cursor", {
           userId,
           name,
           color,
@@ -268,13 +292,14 @@ export function attachSocketIo(io: Server): void {
       },
     );
 
-    socket.on("sheet:scene", (payload: { sheetId?: string; pageId?: string; elements?: unknown; files?: unknown }) => {
+    socket.on("sheet:scene", (payload: { sheetId?: string; pageId?: string; elements?: unknown; delta?: unknown; files?: unknown }) => {
       const { sheetId, pageId, elements, files } = payload || {};
       if (!sheetId || socket.data.activeSheet !== sheetId) return;
-      socket.to(`sheet:${sheetId}`).emit("sheet:scene", {
+      socket.volatile.to(`sheet:${sheetId}`).emit("sheet:scene", {
         sheetId,
         pageId,
         elements,
+        delta: payload?.delta,
         files,
         fromUserId: userId,
         fromSocketId: socket.id,
@@ -337,6 +362,21 @@ export function attachSocketIo(io: Server): void {
           contentVersion,
           fromUserId: userId,
           fromSocketId: socket.id,
+        });
+      },
+    );
+
+    socket.on(
+      "rtc:signal",
+      (payload: { sheetId?: string; toSocketId?: string; kind?: "offer" | "answer" | "ice"; data?: unknown }) => {
+        const sheetId = payload?.sheetId;
+        const toSocketId = payload?.toSocketId;
+        if (!sheetId || !toSocketId || socket.data.activeSheet !== sheetId) return;
+        io.to(toSocketId).emit("rtc:signal", {
+          sheetId,
+          fromSocketId: socket.id,
+          kind: payload?.kind,
+          data: payload?.data,
         });
       },
     );

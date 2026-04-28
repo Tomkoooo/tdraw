@@ -20,7 +20,13 @@ import {
   Sparkles,
   UserRound,
 } from "lucide-react";
-import { createFolder, permanentlyDeleteFolder, restoreFolderFromTrash, renameFolder } from "@/lib/actions/folder";
+import {
+  createFolder,
+  permanentlyDeleteFolder,
+  restoreFolderFromTrash,
+  renameFolder,
+  setFolderRoleAccess,
+} from "@/lib/actions/folder";
 import {
   createSheet,
   moveSheetToFolder,
@@ -30,6 +36,7 @@ import {
   bulkSetSheetPinned,
   bulkMoveSheetsToTrash,
   updateSheetTitle,
+  setOrgSheetRoleAccess,
 } from "@/lib/actions/sheet";
 import { toastActionError, toastActionSuccess } from "@/lib/client/actionFeedback";
 import UserAvatar from "@/components/UserAvatar";
@@ -121,6 +128,7 @@ type LibraryShellViewProps = {
   setOrgAct: (a: Record<string, DocEditActivity | null>) => void;
   docPresence: DocPresenceMap;
   setDocPresence: (m: DocPresenceMap) => void;
+  orgOnline: OnlineMember[];
 };
 
 function sortNotes<T extends { title: string; updatedAt: string; createdAt: string; pinned?: boolean }>(list: T[], sort: DriveSort) {
@@ -163,6 +171,8 @@ export default function LibraryShellView(v: LibraryShellViewProps) {
   const { dndMode, showRootDrop, drNotes, sensors, onDragStartFull, onDragEnd, activeDrag } = v;
   const orgDndId = v.orgId ? DND_ROOT_ORG(v.orgId) : null;
   const [moveTo, setMoveTo] = useState<null | { itemKind: "sheet" | "folder"; sheetIds: string[] | null; movingFolderId: string | null }>(null);
+  const [policyTarget, setPolicyTarget] = useState<null | { kind: "sheet" | "folder"; id: string; name: string }>(null);
+  const [policyBusy, setPolicyBusy] = useState(false);
   const [renFolder, setRenFolder] = useState<FolderTreeEntry | null>(null);
   const [renFolderV, setRenFolderV] = useState("");
   const [bulkTrashIds, setBulkTrash] = useState<string[] | null>(null);
@@ -182,6 +192,20 @@ export default function LibraryShellView(v: LibraryShellViewProps) {
 
   const dndOn =
     (v.node === "drive" && !v.orgId) || (v.node === "org" && v.orgId);
+  const isOrgAdmin = useMemo(
+    () => Boolean(v.orgId && p.orgs.find((o) => o._id === v.orgId)?.role === "admin"),
+    [v.orgId, p.orgs],
+  );
+  const [adminLevel, setAdminLevel] = useState<"hidden" | "view" | "read_only" | "full">("full");
+  const [memberLevel, setMemberLevel] = useState<"hidden" | "view" | "read_only" | "full">("full");
+  const [guestLevel, setGuestLevel] = useState<"hidden" | "view" | "read_only" | "full">("read_only");
+
+  const openPolicyEditor = useCallback((target: { kind: "sheet" | "folder"; id: string; name: string }) => {
+    setPolicyTarget(target);
+    setAdminLevel("full");
+    setMemberLevel("full");
+    setGuestLevel("read_only");
+  }, []);
 
   /* eslint-disable react-hooks/exhaustive-deps -- v.* props from parent LibraryShell; setters are stable */
   const closeMenu = useCallback(() => v.setMoreOpen(false), [v.setMoreOpen]);
@@ -343,6 +367,33 @@ export default function LibraryShellView(v: LibraryShellViewProps) {
                       {handleSegmentLabel}
                     </p>
                     <h1 className="max-w-2xl truncate text-2xl font-bold tracking-tight text-[var(--color-text)] md:text-[28px]">Library</h1>
+                    {v.node === "org" && v.orgId ? (
+                      <div className="mt-1 flex items-center gap-2">
+                        <span className="text-[10px] font-semibold uppercase tracking-wide text-gray-500">Online</span>
+                        {v.orgOnline.length === 0 ? (
+                          <span className="text-xs text-gray-500">none</span>
+                        ) : (
+                          <div className="flex items-center gap-1">
+                            {v.orgOnline.slice(0, 8).map((m) => (
+                              <span
+                                key={m.userId}
+                                className="inline-flex h-6 w-6 items-center justify-center overflow-hidden rounded-full border border-white/70 bg-black/10 text-[10px] font-semibold text-white dark:border-white/25"
+                                title={m.name}
+                              >
+                                {m.image ? (
+                                  <img src={m.image} alt="" className="h-full w-full object-cover" />
+                                ) : (
+                                  (m.name || "U").slice(0, 1).toUpperCase()
+                                )}
+                              </span>
+                            ))}
+                            {v.orgOnline.length > 8 ? (
+                              <span className="text-xs text-gray-500">+{v.orgOnline.length - 8}</span>
+                            ) : null}
+                          </div>
+                        )}
+                      </div>
+                    ) : null}
                   </div>
                   <div className="ml-auto flex shrink-0 items-center gap-2">
                     <Link
@@ -584,6 +635,7 @@ export default function LibraryShellView(v: LibraryShellViewProps) {
                         selected={v.sel.has(s._id)}
                         selectMode={v.selectMode}
                         dndEnabled={false}
+                        docPresence={v.docPresence[s._id] ?? null}
                         onSelectToggle={(id) => {
                           v.setSelectMode(true);
                           v.setSel((p0) => {
@@ -687,6 +739,7 @@ export default function LibraryShellView(v: LibraryShellViewProps) {
                           selected={v.sel.has(s._id)}
                           selectMode={v.selectMode}
                           dndEnabled
+                          docPresence={v.docPresence[s._id] ?? null}
                           onSelectToggle={(id) => {
                             v.setSelectMode(true);
                             v.setSel((p0) => {
@@ -845,6 +898,55 @@ export default function LibraryShellView(v: LibraryShellViewProps) {
                   Move to trash
                 </button>
               ) : null}
+              {v.node === "org" && v.orgId && isOrgAdmin ? (
+                <>
+                  <button
+                    type="button"
+                    className="w-full px-2 py-1.5 text-left text-sm"
+                    onClick={() => {
+                      const s = v.ctx!.sheet!;
+                      v.setCtx(null);
+                      openPolicyEditor({ kind: "sheet", id: s._id, name: s.title || "File" });
+                    }}
+                  >
+                    Manage role access…
+                  </button>
+                  <button
+                    type="button"
+                    className="w-full px-2 py-1.5 text-left text-sm"
+                    onClick={async () => {
+                      const s = v.ctx!.sheet!;
+                      v.setCtx(null);
+                      try {
+                        await setOrgSheetRoleAccess(s._id, "guest", "read_only", v.orgId!);
+                        toastActionSuccess("Guests set to read-only for this file");
+                        router.refresh();
+                      } catch (e) {
+                        toastActionError(e, { id: "sheet-role-policy" });
+                      }
+                    }}
+                  >
+                    Restrict guests: read-only
+                  </button>
+                  <button
+                    type="button"
+                    className="w-full px-2 py-1.5 text-left text-sm"
+                    onClick={async () => {
+                      const s = v.ctx!.sheet!;
+                      v.setCtx(null);
+                      try {
+                        await setOrgSheetRoleAccess(s._id, "guest", "hidden", v.orgId!);
+                        toastActionSuccess("Guests hidden for this file");
+                        router.refresh();
+                      } catch (e) {
+                        toastActionError(e, { id: "sheet-role-policy-hide" });
+                      }
+                    }}
+                  >
+                    Restrict guests: hidden
+                  </button>
+                </>
+              ) : null}
             </div>
           ) : v.ctx.k === "folder" && v.ctx.folder ? (
             <div>
@@ -878,6 +980,55 @@ export default function LibraryShellView(v: LibraryShellViewProps) {
                   Rename
                 </button>
               ) : null}
+              {v.node === "org" && v.orgId && isOrgAdmin ? (
+                <>
+                  <button
+                    type="button"
+                    className="w-full px-2 py-1.5 text-left text-sm"
+                    onClick={() => {
+                      const f = v.ctx!.folder!;
+                      v.setCtx(null);
+                      openPolicyEditor({ kind: "folder", id: f._id, name: f.name || "Folder" });
+                    }}
+                  >
+                    Manage role access…
+                  </button>
+                  <button
+                    type="button"
+                    className="w-full px-2 py-1.5 text-left text-sm"
+                    onClick={async () => {
+                      const f = v.ctx!.folder!._id;
+                      v.setCtx(null);
+                      try {
+                        await setFolderRoleAccess(f, "guest", "read_only", v.orgId!);
+                        toastActionSuccess("Guests set to read-only for this folder");
+                        router.refresh();
+                      } catch (e) {
+                        toastActionError(e, { id: "folder-role-policy" });
+                      }
+                    }}
+                  >
+                    Restrict guests: read-only
+                  </button>
+                  <button
+                    type="button"
+                    className="w-full px-2 py-1.5 text-left text-sm"
+                    onClick={async () => {
+                      const f = v.ctx!.folder!._id;
+                      v.setCtx(null);
+                      try {
+                        await setFolderRoleAccess(f, "guest", "hidden", v.orgId!);
+                        toastActionSuccess("Guests hidden for this folder");
+                        router.refresh();
+                      } catch (e) {
+                        toastActionError(e, { id: "folder-role-policy-hide" });
+                      }
+                    }}
+                  >
+                    Restrict guests: hidden
+                  </button>
+                </>
+              ) : null}
             </div>
           ) : null}
         </div>
@@ -909,6 +1060,91 @@ export default function LibraryShellView(v: LibraryShellViewProps) {
         movingSheetIds={moveTo?.sheetIds ?? null}
         movingFolderId={moveTo?.movingFolderId ?? null}
       />
+      {policyTarget && v.orgId ? (
+        <div className="fixed inset-0 z-[230] flex items-center justify-center bg-black/55 p-4" role="dialog">
+          <button
+            type="button"
+            className="absolute inset-0"
+            aria-label="Close"
+            onClick={() => (policyBusy ? null : setPolicyTarget(null))}
+          />
+          <div className="relative z-10 w-full max-w-lg rounded-3xl bg-[var(--bg-elevated)] p-5 shadow-2xl">
+            <h3 className="text-lg font-bold">Role access policy</h3>
+            <p className="mt-1 text-sm text-gray-500">
+              {policyTarget.kind === "folder" ? "Folder" : "File"}: {policyTarget.name}
+            </p>
+            <div className="mt-4 space-y-3">
+              {([
+                ["admin", adminLevel, setAdminLevel],
+                ["member", memberLevel, setMemberLevel],
+                ["guest", guestLevel, setGuestLevel],
+              ] as const).map(([role, value, setter]) => (
+                <div key={role} className="flex items-center justify-between gap-3 rounded-2xl bg-black/5 px-3 py-2.5 dark:bg-white/10">
+                  <span className="text-sm font-semibold capitalize">{role}</span>
+                  <select
+                    className="input-field min-h-9 rounded-xl px-2 text-xs"
+                    value={value}
+                    onChange={(e) => setter(e.target.value as "hidden" | "view" | "read_only" | "full")}
+                  >
+                    <option value="full">Full</option>
+                    <option value="read_only">Read-only</option>
+                    <option value="view">View</option>
+                    <option value="hidden">Hidden</option>
+                  </select>
+                </div>
+              ))}
+            </div>
+            <div className="mt-3 rounded-2xl bg-black/5 px-3 py-2 text-xs text-gray-600 dark:bg-white/10 dark:text-gray-300">
+              Effective preview:
+              <span className="ml-1 font-semibold">Admins {adminLevel}</span> ·
+              <span className="ml-1 font-semibold">Members {memberLevel}</span> ·
+              <span className="ml-1 font-semibold">Guests {guestLevel}</span>
+            </div>
+            <div className="mt-5 flex justify-end gap-2">
+              <button
+                type="button"
+                className="rounded-xl border border-white/20 px-3 py-2 text-sm font-semibold"
+                onClick={() => (policyBusy ? null : setPolicyTarget(null))}
+                disabled={policyBusy}
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                className="rounded-xl bg-[var(--color-accent)] px-3 py-2 text-sm font-semibold text-white disabled:opacity-50"
+                disabled={policyBusy}
+                onClick={async () => {
+                  setPolicyBusy(true);
+                  try {
+                    const applyRole = async (
+                      role: "admin" | "member" | "guest",
+                      level: "hidden" | "view" | "read_only" | "full",
+                    ) => {
+                      if (policyTarget.kind === "folder") {
+                        await setFolderRoleAccess(policyTarget.id, role, level, v.orgId!);
+                      } else {
+                        await setOrgSheetRoleAccess(policyTarget.id, role, level, v.orgId!);
+                      }
+                    };
+                    await applyRole("admin", adminLevel);
+                    await applyRole("member", memberLevel);
+                    await applyRole("guest", guestLevel);
+                    toastActionSuccess("Policy updated");
+                    setPolicyTarget(null);
+                    router.refresh();
+                  } catch (e) {
+                    toastActionError(e, { id: "role-policy-modal" });
+                  } finally {
+                    setPolicyBusy(false);
+                  }
+                }}
+              >
+                {policyBusy ? "Saving…" : "Save policy"}
+              </button>
+            </div>
+          </div>
+        </div>
+      ) : null}
       <ConfirmDialog
         open={v.confirm != null}
         title="Permanently delete"

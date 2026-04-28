@@ -112,12 +112,14 @@ type RemoteCursor = {
 };
 
 /** Drop trail segments older than this so the laser tail vanishes quickly. */
-const LASER_TRAIL_POINT_MS = 320;
+const LASER_TRAIL_POINT_MS = 420;
 /** Remove laser cursor overlay soon after the peer stops sending. */
-const REMOTE_LASER_IDLE_MS = 550;
+const REMOTE_LASER_IDLE_MS = 720;
 /** Non-laser remote pointer can stay visible longer while idle. */
 const REMOTE_CURSOR_STALE_MS = 2000;
 const CURSOR_PRUNE_INTERVAL_MS = 120;
+const LIVE_SCENE_EMIT_MS = 140;
+const LIVE_SCENE_FULL_SYNC_MS = 1800;
 
 const queueKey = (sheetId: string) => `excalidraw-save-queue-${sheetId}`;
 const cachedDocKey = (sheetId: string) => `excalidraw-cached-doc-${sheetId}`;
@@ -296,6 +298,76 @@ function buildSceneFingerprint(elements: readonly Record<string, unknown>[]): st
     .join("|");
 }
 
+type SceneDeltaPayload = {
+  upserts: Record<string, unknown>[];
+  removeIds: string[];
+};
+
+function elementToken(element: Record<string, unknown>): string {
+  const id = typeof element.id === "string" ? element.id : "";
+  const version = typeof element.version === "number" ? element.version : 0;
+  const deleted = Boolean(element.isDeleted);
+  return `${id}:${version}:${deleted ? 1 : 0}`;
+}
+
+function indexScene(elements: Record<string, unknown>[]) {
+  const byId = new Map<string, Record<string, unknown>>();
+  const tokenById = new Map<string, string>();
+  for (const element of elements) {
+    const id = typeof element.id === "string" ? element.id : "";
+    if (!id) continue;
+    byId.set(id, element);
+    tokenById.set(id, elementToken(element));
+  }
+  return { byId, tokenById };
+}
+
+function buildSceneDelta(
+  prevTokens: Map<string, string>,
+  elements: Record<string, unknown>[],
+): { delta: SceneDeltaPayload; nextTokens: Map<string, string>; hasChanges: boolean } {
+  const { byId, tokenById } = indexScene(elements);
+  const upserts: Record<string, unknown>[] = [];
+  const removeIds: string[] = [];
+
+  for (const [id, token] of tokenById.entries()) {
+    if (prevTokens.get(id) !== token) {
+      const item = byId.get(id);
+      if (item) upserts.push(item);
+    }
+  }
+  for (const id of prevTokens.keys()) {
+    if (!tokenById.has(id)) removeIds.push(id);
+  }
+
+  return {
+    delta: { upserts, removeIds },
+    nextTokens: tokenById,
+    hasChanges: upserts.length > 0 || removeIds.length > 0,
+  };
+}
+
+function applySceneDelta(
+  currentElements: Record<string, unknown>[],
+  delta: SceneDeltaPayload,
+): Record<string, unknown>[] {
+  const nextById = new Map<string, Record<string, unknown>>();
+  for (const el of currentElements) {
+    const id = typeof el.id === "string" ? el.id : "";
+    if (!id) continue;
+    nextById.set(id, el);
+  }
+  for (const id of delta.removeIds) {
+    nextById.delete(id);
+  }
+  for (const el of delta.upserts) {
+    const id = typeof el.id === "string" ? el.id : "";
+    if (!id) continue;
+    nextById.set(id, el);
+  }
+  return [...nextById.values()];
+}
+
 export default function ExcalidrawEditor({
   sheetId,
   initialData,
@@ -350,6 +422,8 @@ export default function ExcalidrawEditor({
   const mySocketIdRef = useRef<string | null>(null);
   const liveSceneDebounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const lastLiveFileIdsRef = useRef<Set<string>>(new Set());
+  const lastLiveSceneTokensByPageRef = useRef<Map<string, Map<string, string>>>(new Map());
+  const lastLiveFullSceneAtRef = useRef(0);
   const lastCursorEmitRef = useRef(0);
   const remoteCursorsRef = useRef<Record<string, RemoteCursor>>({});
   const lastLocalSceneEditAtRef = useRef(0);
@@ -704,7 +778,7 @@ export default function ExcalidrawEditor({
       const now = Date.now();
       const app = api.getAppState() as unknown as { activeTool?: { type?: string } };
       const isLaser = app.activeTool?.type === "laser";
-      const minMs = isLaser ? 18 : 50;
+      const minMs = isLaser ? 20 : 38;
       if (now - lastCursorEmitRef.current < minMs) return;
       lastCursorEmitRef.current = now;
       const { x, y } = viewportCoordsToSceneCoords({ clientX: e.clientX, clientY: e.clientY }, pointerAppState(api));
@@ -771,14 +845,22 @@ export default function ExcalidrawEditor({
               lastLiveFileIdsRef.current.add(k);
             }
           }
+          const rawElements = api.getSceneElements() as unknown as Record<string, unknown>[];
+          const prevTokens = lastLiveSceneTokensByPageRef.current.get(pageId) ?? new Map<string, string>();
+          const { delta, nextTokens, hasChanges } = buildSceneDelta(prevTokens, rawElements);
+          lastLiveSceneTokensByPageRef.current.set(pageId, nextTokens);
+          const forceFull = Date.now() - lastLiveFullSceneAtRef.current > LIVE_SCENE_FULL_SYNC_MS;
+          if (!hasChanges && !forceFull) return;
           s.emit("sheet:scene", {
             sheetId,
             pageId,
-            elements: api.getSceneElements() as unknown as Record<string, unknown>[],
+            elements: forceFull ? rawElements : undefined,
+            delta: !forceFull ? delta : undefined,
             files: Object.keys(out).length > 0 ? out : undefined,
           });
+          if (forceFull) lastLiveFullSceneAtRef.current = Date.now();
           s.emit("sheet:editing", { sheetId });
-        }, 500);
+        }, LIVE_SCENE_EMIT_MS);
       }
 
       const nextFingerprint = buildSceneFingerprint(typedElements);
@@ -858,6 +940,8 @@ export default function ExcalidrawEditor({
 
   useEffect(() => {
     lastLiveFileIdsRef.current = new Set(Object.keys(docStateRef.current.files));
+    lastLiveSceneTokensByPageRef.current.clear();
+    lastLiveFullSceneAtRef.current = 0;
     if (liveSceneDebounceRef.current) {
       clearTimeout(liveSceneDebounceRef.current);
       liveSceneDebounceRef.current = null;
@@ -915,10 +999,10 @@ export default function ExcalidrawEditor({
           const sid = socket.id ?? null;
           setMySocketId(sid);
           mySocketIdRef.current = sid;
+          socket.emit("joinSheet", sheetId);
         };
         onConnectHandler();
         socket.on("connect", onConnectHandler);
-        socket.emit("joinSheet", sheetId);
 
         socket.on(
           "sheet:snapshot",
@@ -963,11 +1047,12 @@ export default function ExcalidrawEditor({
           (payload: {
             pageId?: string;
             elements?: unknown;
+            delta?: SceneDeltaPayload;
             files?: unknown;
             fromSocketId?: string;
           }) => {
             if (!payload.fromSocketId || payload.fromSocketId === mySocketIdRef.current) return;
-            if (!Array.isArray(payload.elements)) return;
+            if (!Array.isArray(payload.elements) && !payload.delta) return;
             const pageId = payload.pageId;
             const localEditAgeMs = Date.now() - lastLocalSceneEditAtRef.current;
             // Guard against late/stale remote scene packets clobbering a shape immediately after local pointer release.
@@ -981,10 +1066,16 @@ export default function ExcalidrawEditor({
               const api = apiRef.current;
               if (!api) return;
               const page = docStateRef.current.pages.find((p) => p.id === pageId);
+              const currentPageElements = (page?.elements ?? []) as Record<string, unknown>[];
+              const nextElements = Array.isArray(payload.elements)
+                ? (payload.elements as Record<string, unknown>[])
+                : payload.delta
+                  ? applySceneDelta(currentPageElements, payload.delta)
+                  : currentPageElements;
               applyScene(
                 api,
                 {
-                  elements: payload.elements as Record<string, unknown>[],
+                  elements: nextElements,
                   appState: page?.appState ?? {},
                   files: fileArr,
                 },
@@ -995,7 +1086,7 @@ export default function ExcalidrawEditor({
                 const next: PersistedDocument = {
                   ...prev,
                   files: mergedFiles,
-                  pages: prev.pages.map((p) => (p.id === pageId ? { ...p, elements: payload.elements as Record<string, unknown>[] } : p)),
+                  pages: prev.pages.map((p) => (p.id === pageId ? { ...p, elements: nextElements } : p)),
                 };
                 docStateRef.current = next;
                 return next;
@@ -1003,15 +1094,55 @@ export default function ExcalidrawEditor({
             } else if (pageId) {
               setDocumentState((prev) => {
                 const mergedFiles = { ...prev.files, ...(filesRec ?? {}) };
+                const page = prev.pages.find((p) => p.id === pageId);
+                const currentPageElements = (page?.elements ?? []) as Record<string, unknown>[];
+                const nextElements = Array.isArray(payload.elements)
+                  ? (payload.elements as Record<string, unknown>[])
+                  : payload.delta
+                    ? applySceneDelta(currentPageElements, payload.delta)
+                    : currentPageElements;
                 const next: PersistedDocument = {
                   ...prev,
                   files: mergedFiles,
-                  pages: prev.pages.map((p) => (p.id === pageId ? { ...p, elements: payload.elements as Record<string, unknown>[] } : p)),
+                  pages: prev.pages.map((p) => (p.id === pageId ? { ...p, elements: nextElements } : p)),
                 };
                 docStateRef.current = next;
                 return next;
               });
             }
+          },
+        );
+
+        socket.on(
+          "presence:sync",
+          (payload: {
+            members?: Array<{
+              userId?: string;
+              name?: string;
+              color?: string;
+              image?: string;
+              fromSocketId?: string;
+            }>;
+          }) => {
+            const rows = Array.isArray(payload?.members) ? payload.members : [];
+            if (rows.length === 0) return;
+            setMembers((prev) => {
+              const next = { ...prev };
+              for (const row of rows) {
+                const sid = row.fromSocketId;
+                const uid = row.userId;
+                if (!sid || !uid || sid === mySocketIdRef.current) continue;
+                next[sid] = {
+                  fromSocketId: sid,
+                  userId: uid,
+                  name: row.name || "User",
+                  color: row.color || "#0071E3",
+                  image: row.image || undefined,
+                  editing: Boolean(next[sid]?.editing),
+                };
+              }
+              return next;
+            });
           },
         );
 

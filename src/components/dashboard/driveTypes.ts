@@ -9,6 +9,8 @@ export type SheetCard = {
   pinned?: boolean;
   approxBytes?: number;
   userId?: string | null;
+  accessLevel?: "hidden" | "view" | "read_only" | "full" | "owner_bypass";
+  canWriteByPolicy?: boolean;
 };
 
 export type FolderRow = {
@@ -18,4 +20,6 @@ export type FolderRow = {
   pinned?: boolean;
   createdAt?: string;
   updatedAt?: string;
+  accessLevel?: "hidden" | "view" | "read_only" | "full" | "owner_bypass";
+  canWriteByPolicy?: boolean;
 };

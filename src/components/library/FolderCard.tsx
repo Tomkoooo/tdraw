@@ -4,7 +4,7 @@ import { useCallback, useRef } from "react";
 import { useDraggable, useDroppable } from "@dnd-kit/core";
 import { CSS } from "@dnd-kit/utilities";
 import { motion } from "framer-motion";
-import { Folder, Pin, Check } from "lucide-react";
+import { Folder, Lock, Pin, Check } from "lucide-react";
 import type { FolderTreeEntry } from "./types";
 import { dndIdFolder, dndIdDropFolder } from "./types";
 
@@ -98,6 +98,11 @@ export default function FolderCard({
           </p>
           <p className="text-[10px] text-gray-500">
             {row.count} note{row.count === 1 ? "" : "s"}
+            {row.accessLevel && row.accessLevel !== "owner_bypass" && row.accessLevel !== "full" ? (
+              <span className="ml-1 inline-flex items-center gap-0.5">
+                <Lock className="h-3 w-3" /> {row.accessLevel === "read_only" ? "read-only" : row.accessLevel}
+              </span>
+            ) : null}
           </p>
         </div>
       </motion.button>
@@ -143,6 +148,9 @@ export default function FolderCard({
           <p className="pl-0.5 text-left text-[10px] text-gray-500">
             {row.count} item{row.count === 1 ? "" : "s"}{" "}
             {row.lastActivity ? `· ${new Date(row.lastActivity).toLocaleDateString()}` : ""}
+            {row.accessLevel && row.accessLevel !== "owner_bypass" && row.accessLevel !== "full"
+              ? ` · ${row.accessLevel === "read_only" ? "read-only" : row.accessLevel}`
+              : ""}
           </p>
         </div>
       </button>

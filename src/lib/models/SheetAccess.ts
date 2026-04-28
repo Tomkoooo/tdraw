@@ -1,23 +1,19 @@
 import mongoose, { Schema, Document } from "mongoose";
 import type { OrgMemberRole } from "./Organization";
+import type { FolderPermissionLevel } from "./FolderAccess";
 
-/** Folder ACL: applies to members (org) or explicit users (personal shared folders). */
-export type FolderPermissionLevel = "hidden" | "view" | "read_only" | "full";
-
-export interface IFolderAccess extends Document {
-  folderId: mongoose.Types.ObjectId;
-  /** User subject (org member override). */
+export interface ISheetAccess extends Document {
+  sheetId: mongoose.Types.ObjectId;
   userId?: mongoose.Types.ObjectId;
-  /** Role subject (org baseline override for this folder). */
   role?: OrgMemberRole;
   level: FolderPermissionLevel;
   createdAt: Date;
   updatedAt: Date;
 }
 
-const FolderAccessSchema = new Schema(
+const SheetAccessSchema = new Schema(
   {
-    folderId: { type: Schema.Types.ObjectId, ref: "Folder", required: true, index: true },
+    sheetId: { type: Schema.Types.ObjectId, ref: "Sheet", required: true, index: true },
     userId: { type: Schema.Types.ObjectId, ref: "User", index: true },
     role: { type: String, enum: ["admin", "member", "guest"], index: true },
     level: { type: String, enum: ["hidden", "view", "read_only", "full"], required: true },
@@ -25,19 +21,19 @@ const FolderAccessSchema = new Schema(
   { timestamps: true }
 );
 
-FolderAccessSchema.index(
-  { folderId: 1, userId: 1 },
+SheetAccessSchema.index(
+  { sheetId: 1, userId: 1 },
   {
     unique: true,
     partialFilterExpression: { userId: { $exists: true, $ne: null } },
   },
 );
-FolderAccessSchema.index(
-  { folderId: 1, role: 1 },
+SheetAccessSchema.index(
+  { sheetId: 1, role: 1 },
   {
     unique: true,
     partialFilterExpression: { role: { $exists: true, $ne: null } },
   },
 );
 
-export default mongoose.models.FolderAccess || mongoose.model<IFolderAccess>("FolderAccess", FolderAccessSchema);
+export default mongoose.models.SheetAccess || mongoose.model<ISheetAccess>("SheetAccess", SheetAccessSchema);

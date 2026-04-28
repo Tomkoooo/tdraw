@@ -70,7 +70,9 @@ export default function OrgWorkspaceRealtime({
         onlineRef.current = {};
         docRef.current = {};
 
-        socket.emit("joinOrg", organizationId, () => {});
+        const doJoin = () => socket.emit("joinOrg", organizationId, () => {});
+        doJoin();
+        socket.on("connect", doJoin);
 
         const syncOnline = () => onOnlineRef.current(Object.values(onlineRef.current));
         const syncDoc = () => onDocRef.current({ ...docRef.current });
@@ -83,6 +85,21 @@ export default function OrgWorkspaceRealtime({
           if (p.left) delete onlineRef.current[p.userId];
           syncOnline();
         });
+        socket.on(
+          "org:presenceSync",
+          (p: { members?: Array<{ userId?: string; name?: string; image?: string }> }) => {
+            const rows = Array.isArray(p?.members) ? p.members : [];
+            for (const row of rows) {
+              if (!row?.userId) continue;
+              onlineRef.current[row.userId] = {
+                userId: row.userId,
+                name: row.name ?? "User",
+                image: row.image,
+              };
+            }
+            syncOnline();
+          },
+        );
 
         socket.on(
           "org:docActivity",

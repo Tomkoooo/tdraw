@@ -4,7 +4,7 @@ import { useCallback, useRef } from "react";
 import { useSortable } from "@dnd-kit/sortable";
 import { CSS } from "@dnd-kit/utilities";
 import Link from "next/link";
-import { Pencil, Pin, Check, GripVertical, MoreHorizontal } from "lucide-react";
+import { Pencil, Pin, Check, GripVertical, MoreHorizontal, Lock } from "lucide-react";
 import { motion } from "framer-motion";
 import type { SheetCard } from "./types";
 import { dndIdNote, dndIdDropFolder, DND_DROP_F } from "./types";
@@ -16,6 +16,7 @@ export default function SortableNoteCard({
   selected,
   selectMode,
   dndEnabled,
+  docPresence,
   onSelectToggle,
   onContextMenu,
   sortable = true,
@@ -90,6 +91,27 @@ export default function SortableNoteCard({
               {sheet.title}
             </h3>
             <p className="text-[10px] text-gray-500">{new Date(sheet.updatedAt).toLocaleDateString()}</p>
+            {sheet.accessLevel && sheet.accessLevel !== "owner_bypass" && sheet.accessLevel !== "full" ? (
+              <p className="mt-0.5 inline-flex items-center gap-1 text-[10px] text-amber-600 dark:text-amber-400">
+                <Lock className="h-3 w-3" />
+                {sheet.accessLevel === "read_only" ? "read-only" : sheet.accessLevel}
+              </p>
+            ) : null}
+            {docPresence && docPresence.length > 0 ? (
+              <div className="mt-1 flex items-center gap-1">
+                {docPresence.slice(0, 4).map((p, i) => (
+                  <span
+                    key={`${p.userId}-${i}`}
+                    className={`inline-flex h-5 w-5 items-center justify-center overflow-hidden rounded-full border border-white/70 bg-black/10 text-[9px] font-semibold text-white dark:border-white/25 ${
+                      p.editing ? "ring-1 ring-emerald-400" : ""
+                    }`}
+                    title={`${p.name}${p.editing ? " (editing)" : " (online)"}`}
+                  >
+                    {p.image ? <img src={p.image} alt="" className="h-full w-full object-cover" /> : (p.name || "U").slice(0, 1).toUpperCase()}
+                  </span>
+                ))}
+              </div>
+            ) : null}
           </div>
         </Link>
         {!selectMode ? (
@@ -162,6 +184,27 @@ export default function SortableNoteCard({
           {sheet.title}
         </h3>
         <p className="text-[9px] uppercase text-gray-500 dark:text-gray-500">{new Date(sheet.updatedAt).toLocaleDateString()}</p>
+        {sheet.accessLevel && sheet.accessLevel !== "owner_bypass" && sheet.accessLevel !== "full" ? (
+          <p className="mt-0.5 inline-flex items-center gap-1 text-[9px] uppercase text-amber-600 dark:text-amber-400">
+            <Lock className="h-3 w-3" />
+            {sheet.accessLevel === "read_only" ? "read-only" : sheet.accessLevel}
+          </p>
+        ) : null}
+        {docPresence && docPresence.length > 0 ? (
+          <div className="mt-1 flex items-center gap-1">
+            {docPresence.slice(0, 5).map((p, i) => (
+              <span
+                key={`${p.userId}-${i}`}
+                className={`inline-flex h-5 w-5 items-center justify-center overflow-hidden rounded-full border border-white/70 bg-black/10 text-[9px] font-semibold text-white dark:border-white/25 ${
+                  p.editing ? "ring-1 ring-emerald-400" : ""
+                }`}
+                title={`${p.name}${p.editing ? " (editing)" : " (online)"}`}
+              >
+                {p.image ? <img src={p.image} alt="" className="h-full w-full object-cover" /> : (p.name || "U").slice(0, 1).toUpperCase()}
+              </span>
+            ))}
+          </div>
+        ) : null}
       </Link>
       {!selectMode ? (
         <button
