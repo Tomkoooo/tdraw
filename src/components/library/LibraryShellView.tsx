@@ -267,17 +267,23 @@ export default function LibraryShellView(v: LibraryShellViewProps) {
   );
 
   const folderRoots: FolderTreeEntry[] = useMemo(() => {
+    const currentFolderId = v.folderId ? String(v.folderId) : null;
+    const isValidDirectChild = (f: FolderTreeEntry) => {
+      const id = String(f._id);
+      const parent = f.parentFolderId ? String(f.parentFolderId) : null;
+      if (!currentFolderId) return false;
+      if (id === currentFolderId) return false;
+      if (parent !== currentFolderId) return false;
+      if (parent === id) return false;
+      return true;
+    };
     if (v.node === "drive" && !v.orgId && !v.folderId) return v.pTree.filter((f) => !f.parentFolderId);
     if (v.node === "org" && v.orgId && v.curOrgTree) return v.curOrgTree.filter((f) => !f.parentFolderId);
     if (v.node === "drive" && v.orgId == null && v.folderId) {
-      return v.pTree.filter(
-        (f) => f._id !== v.folderId && f.parentFolderId === v.folderId && f.parentFolderId !== f._id,
-      );
+      return v.pTree.filter(isValidDirectChild);
     }
     if (v.node === "org" && v.orgId && v.folderId) {
-      return (v.curOrgTree ?? []).filter(
-        (f) => f._id !== v.folderId && f.parentFolderId === v.folderId && f.parentFolderId !== f._id,
-      );
+      return (v.curOrgTree ?? []).filter(isValidDirectChild);
     }
     return [];
   }, [v.node, v.orgId, v.folderId, v.pTree, v.curOrgTree]);

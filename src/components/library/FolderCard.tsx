@@ -4,7 +4,7 @@ import { useCallback, useRef } from "react";
 import { useDraggable, useDroppable } from "@dnd-kit/core";
 import { CSS } from "@dnd-kit/utilities";
 import { motion } from "framer-motion";
-import { Folder, Lock, Pin, Check } from "lucide-react";
+import { Folder, Lock, MoreHorizontal, Pin, Check } from "lucide-react";
 import type { FolderTreeEntry } from "./types";
 import { dndIdFolder, dndIdDropFolder } from "./types";
 
@@ -62,12 +62,10 @@ export default function FolderCard({
 
   if (view === "list") {
     return (
-      <motion.button
-        type="button"
-        ref={setNodeRef as React.Ref<HTMLButtonElement>}
+      <motion.div
+        ref={setNodeRef}
         style={t}
         {...(dndEnabled && canDragFolder && !selectMode ? { ...d.attributes, ...d.listeners } : {})}
-        onClick={() => (selectMode ? onSelectToggle(row._id) : onOpen(row._id))}
         onContextMenu={(e) => onContextMenu(e, row)}
         onTouchStart={onTouchStartLong}
         onTouchEnd={onTouchEndLong}
@@ -91,7 +89,11 @@ export default function FolderCard({
             {(!row.coverThumbs || row.coverThumbs.length === 0) ? <Folder className="m-auto h-6 w-6 text-[var(--color-accent)]" /> : null}
           </div>
         </div>
-        <div className="min-w-0 flex-1">
+        <button
+          type="button"
+          className="min-w-0 flex-1 text-left"
+          onClick={() => (selectMode ? onSelectToggle(row._id) : onOpen(row._id))}
+        >
           <p className="truncate text-sm font-bold">
             {row.pinned ? <Pin className="mb-0.5 mr-0.5 inline h-3 w-3 text-[var(--color-accent)]" /> : null}
             {row.name}
@@ -104,8 +106,22 @@ export default function FolderCard({
               </span>
             ) : null}
           </p>
-        </div>
-      </motion.button>
+        </button>
+        {!selectMode ? (
+          <button
+            type="button"
+            className="shrink-0 rounded-xl p-2 text-gray-600 hover:bg-black/10 dark:text-gray-300 dark:hover:bg-white/10"
+            aria-label="Folder actions"
+            onClick={(e) => {
+              e.preventDefault();
+              e.stopPropagation();
+              onContextMenu(e, row);
+            }}
+          >
+            <MoreHorizontal className="h-4 w-4" />
+          </button>
+        ) : null}
+      </motion.div>
     );
   }
 
@@ -154,6 +170,20 @@ export default function FolderCard({
           </p>
         </div>
       </button>
+      {!selectMode ? (
+        <button
+          type="button"
+          className="absolute bottom-3 right-3 z-30 flex h-9 w-9 touch-manipulation items-center justify-center rounded-full bg-black/45 text-white shadow-md backdrop-blur-sm hover:bg-black/55 dark:bg-white/20 dark:hover:bg-white/30"
+          aria-label="Folder actions"
+          onClick={(e) => {
+            e.preventDefault();
+            e.stopPropagation();
+            onContextMenu(e, row);
+          }}
+        >
+          <MoreHorizontal className="h-4 w-4" />
+        </button>
+      ) : null}
     </div>
   );
 }
