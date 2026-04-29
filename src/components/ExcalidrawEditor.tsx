@@ -292,7 +292,14 @@ function buildSceneFingerprint(elements: readonly Record<string, unknown>[]): st
       const id = typeof element.id === "string" ? element.id : "";
       const version = typeof element.version === "number" ? element.version : 0;
       const deleted = Boolean(element.isDeleted);
-      return `${id}:${version}:${deleted ? 1 : 0}`;
+      const x = typeof element.x === "number" ? element.x : 0;
+      const y = typeof element.y === "number" ? element.y : 0;
+      const width = typeof element.width === "number" ? element.width : 0;
+      const height = typeof element.height === "number" ? element.height : 0;
+      const angle = typeof element.angle === "number" ? element.angle : 0;
+      const pointsLen = Array.isArray(element.points) ? element.points.length : 0;
+      const text = typeof element.text === "string" ? element.text : "";
+      return `${id}:${version}:${deleted ? 1 : 0}:${x}:${y}:${width}:${height}:${angle}:${pointsLen}:${text}`;
     })
     .sort()
     .join("|");
