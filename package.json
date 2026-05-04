@@ -3,6 +3,10 @@
   "version": "1.0.0",
   "private": true,
   "scripts": {
+    "plugin:pencil": "npm install --prefix plugins/pencil-enhanced && npm run build --prefix plugins/pencil-enhanced",
+    "cap:sync": "npm run plugin:pencil && npx cap sync",
+    "cap:ios": "npx cap open ios",
+    "cap:android": "npx cap open android",
     "dev": "tsx server/index.ts",
     "build": "next build && npm run build:server",
     "build:server": "esbuild server/index.ts --bundle --platform=node --packages=external --format=cjs --outfile=server/prod.cjs",
@@ -16,6 +20,10 @@
     "realtime": "tsx realtime/server.ts"
   },
   "dependencies": {
+    "@capacitor/android": "6.2.1",
+    "@capacitor/cli": "6.2.1",
+    "@capacitor/core": "6.2.1",
+    "@capacitor/ios": "6.2.1",
     "@dnd-kit/core": "^6.3.1",
     "@dnd-kit/sortable": "^10.0.0",
     "@dnd-kit/utilities": "^3.2.2",
@@ -37,12 +45,14 @@
     "nodemailer": "^7.0.10",
     "pdf-lib": "^1.17.1",
     "pdfjs-dist": "^5.6.205",
+    "pencil-enhanced": "file:./plugins/pencil-enhanced",
     "react": "19.2.4",
     "react-dom": "19.2.4",
     "socket.io": "^4.8.3",
     "socket.io-client": "^4.8.3",
     "sonner": "^2.0.7",
-    "tailwind-merge": "^3.5.0"
+    "tailwind-merge": "^3.5.0",
+    "tesseract.js": "^7.0.0"
   },
   "devDependencies": {
     "@tailwindcss/postcss": "^4",

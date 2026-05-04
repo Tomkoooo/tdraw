@@ -22,6 +22,7 @@ export default async function SheetPage({ params }: { params: Promise<{ id: stri
       canWrite={sheet.canWrite}
       canTitle={sheet.canTitle}
       contentVersion={sheet.contentVersion}
+      initialServerUpdatedAt={sheet.updatedAt}
       hotbarToolIds={hotbarToolIds}
       userName={session?.user?.name ?? null}
       userImage={session?.user?.image ?? null}

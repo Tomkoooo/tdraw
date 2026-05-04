@@ -5,7 +5,7 @@ import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { io, type Socket } from "socket.io-client";
 import localforage from "localforage";
-import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { toast } from "sonner";
 import { sceneCoordsToViewportCoords, viewportCoordsToSceneCoords } from "@excalidraw/excalidraw";
 import {
@@ -15,23 +15,51 @@ import {
   FileDown,
   FileUp,
   Loader2,
+  PenLine,
   Plus,
   RefreshCcw,
   Settings,
   Sun,
   Trash2,
   Users,
+  Wand2,
+  Save,
+  ZoomIn,
+  ZoomOut,
 } from "lucide-react";
 
 import { saveSheetState, updateSheetTitle } from "@/lib/actions/sheet";
 import { getRealtimeToken } from "@/lib/actions/socketToken";
 import { exportEditorToPdf, exportPagesToPdf } from "@/lib/pdf/exportEditorToPdf";
 import { importPdfToEditor, renderPdfToPages } from "@/lib/pdf/importPdfToEditor";
+import { setActiveToolFreedraw } from "@/lib/native/excalidrawPencilActions";
+import { insertHandwrittenTextAtScenePoint } from "@/lib/native/handwritingToExcalidraw";
+import type { MathSuggestion } from "@/lib/native/mathSuggestions";
 import SheetVisitRecorder from "@/components/SheetVisitRecorder";
 import UserAvatar from "@/components/UserAvatar";
 import SheetShareForm from "@/components/SheetShareForm";
 import CanvasShareSheet from "@/components/canvas/CanvasShareSheet";
 import type { ExcalidrawImperativeApiLike } from "@/components/canvas/ExcalidrawCanvas";
+import { usePencilEnhanced } from "@/hooks/usePencilEnhanced";
+import {
+  getExcalidrawPenMode,
+  getInkMathSuggestionEnabled,
+  getInkToTextModeEnabled,
+  getOcrLocale,
+  getPencilDoubleTapAction,
+  getPencilOnlyInput,
+  getScribbleEraseEnabled,
+  getUseTesseractFallback,
+  setExcalidrawPenMode,
+  setInkMathSuggestionEnabled,
+  setInkToTextModeEnabled,
+  setOcrLocale,
+  setPencilDoubleTapAction,
+  setPencilOnlyInput,
+  setScribbleEraseEnabled,
+  setUseTesseractFallback,
+  type PencilDoubleTapAction,
+} from "@/lib/native/pencilSettings";
 
 const ExcalidrawCanvas = dynamic(() => import("./canvas/ExcalidrawCanvas"), {
   ssr: false,
@@ -55,6 +83,12 @@ interface ExcalidrawEditorProps {
   userId?: string;
   organizationId?: string | null;
   showSharePanel?: boolean;
+  /** Raw public share token from `/share/sheet/[token]` — authenticates realtime as read-only + laser. */
+  shareReadToken?: string | null;
+  /** When true with `!canWrite`, pointer moves broadcast as laser (for anonymous public share). */
+  sharePublicLaserMode?: boolean;
+  /** ISO timestamp of last server `updatedAt` when the page loaded — shown until you save again. */
+  initialServerUpdatedAt?: string;
 }
 
 type BusyKind = "import" | "export";
@@ -151,16 +185,14 @@ function isObj(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null;
 }
 
+/**
+ * Keep any Excalidraw scene item with id + type. Requiring numeric x/y/w/h dropped real strokes
+ * (Excalidraw often omits or defers dimensions), which emptied `documentState`, broke autosave
+ * fingerprints, and stripped elements when loading from Mongo.
+ */
 function isSceneElement(value: unknown): value is Record<string, unknown> {
   if (!isObj(value)) return false;
-  return (
-    typeof value.type === "string" &&
-    typeof value.id === "string" &&
-    typeof value.x === "number" &&
-    typeof value.y === "number" &&
-    typeof value.width === "number" &&
-    typeof value.height === "number"
-  );
+  return typeof value.type === "string" && value.type.length > 0 && typeof value.id === "string" && value.id.length > 0;
 }
 
 function getErrorMessage(error: unknown): string {
@@ -286,6 +318,22 @@ function getElementBounds(elements: readonly Record<string, unknown>[]): Minimap
   return { minX, minY, maxX, maxY };
 }
 
+/** Sampled point coords so freedraw edits change the fingerprint (length-only was too lossy). */
+function pointsDigest(element: Record<string, unknown>): string {
+  const pts = Array.isArray(element.points) ? element.points : [];
+  const n = pts.length;
+  if (n === 0) return "0";
+  const step = Math.max(1, Math.floor(n / 24));
+  let s = `${n}:`;
+  for (let i = 0; i < n; i += step) {
+    const p = pts[i];
+    if (Array.isArray(p) && p.length >= 2) {
+      s += `${Math.round(Number(p[0]) * 100)}x${Math.round(Number(p[1]) * 100)},`;
+    }
+  }
+  return s.slice(0, 320);
+}
+
 function buildSceneFingerprint(elements: readonly Record<string, unknown>[]): string {
   return elements
     .map((element) => {
@@ -299,7 +347,8 @@ function buildSceneFingerprint(elements: readonly Record<string, unknown>[]): st
       const angle = typeof element.angle === "number" ? element.angle : 0;
       const pointsLen = Array.isArray(element.points) ? element.points.length : 0;
       const text = typeof element.text === "string" ? element.text : "";
-      return `${id}:${version}:${deleted ? 1 : 0}:${x}:${y}:${width}:${height}:${angle}:${pointsLen}:${text}`;
+      const stroke = typeof element.strokeColor === "string" ? element.strokeColor : "";
+      return `${id}:${version}:${deleted ? 1 : 0}:${x}:${y}:${width}:${height}:${angle}:${pointsLen}:${stroke}:${text}:${pointsDigest(element)}`;
     })
     .sort()
     .join("|");
@@ -387,6 +436,9 @@ export default function ExcalidrawEditor({
   userImage,
   userId,
   showSharePanel = true,
+  shareReadToken = null,
+  sharePublicLaserMode = false,
+  initialServerUpdatedAt,
 }: ExcalidrawEditorProps) {
   void hotbarToolIds;
 
@@ -406,12 +458,43 @@ export default function ExcalidrawEditor({
   const [cursorRerender, setCursorRerender] = useState(0);
   const [excalidrawTheme, setExcalidrawTheme] = useState<"light" | "dark">("light");
   const [saveState, setSaveState] = useState<SaveState>("saved");
+  const [lastServerSaveAtMs, setLastServerSaveAtMs] = useState<number | null>(() => {
+    if (typeof initialServerUpdatedAt !== "string" || !initialServerUpdatedAt.trim()) return null;
+    const t = Date.parse(initialServerUpdatedAt);
+    return Number.isFinite(t) ? t : null;
+  });
   const [isOnline, setIsOnline] = useState(true);
   const [minimapState, setMinimapState] = useState<MinimapState>({ scene: null, viewport: null });
   const [renamePageOpen, setRenamePageOpen] = useState(false);
   const [renamePageValue, setRenamePageValue] = useState("");
+  const [imperativeEpoch, setImperativeEpoch] = useState(0);
+  const [pencilDoubleTapSetting, setPencilDoubleTapSetting] = useState<PencilDoubleTapAction>(() => getPencilDoubleTapAction());
+  const [scribbleEraseOn, setScribbleEraseOn] = useState(() => getScribbleEraseEnabled());
+  const [pencilOnlyOn, setPencilOnlyOn] = useState(() => getPencilOnlyInput());
+  const [excalidrawPenModeOn, setExcalidrawPenModeOn] = useState(() => getExcalidrawPenMode());
+  const [inkToTextOn, setInkToTextOn] = useState(() => getInkToTextModeEnabled());
+  const [inkMathSuggestOn, setInkMathSuggestOn] = useState(() => getInkMathSuggestionEnabled());
+  const [ocrLocale, setOcrLocaleState] = useState(() => getOcrLocale());
+  const [useTesseractFallback, setUseTesseractFallbackState] = useState(() => getUseTesseractFallback());
+  const [pencilSettingsOpen, setPencilSettingsOpen] = useState(false);
+  const [pendingMathSuggestion, setPendingMathSuggestion] = useState<{
+    original: string;
+    expression: string;
+    result: string;
+    x: number;
+    y: number;
+  } | null>(null);
+  const [pendingInkOcrIds, setPendingInkOcrIds] = useState<string[]>([]);
+  const [pendingInkOcrRects, setPendingInkOcrRects] = useState<
+    { id: string; left: number; top: number; width: number; height: number }[]
+  >([]);
+  /** When true, next freedraw strokes use OCR until the tool changes away from freedraw or the user toggles off. */
+  const magicInkArmedRef = useRef(false);
+  const [magicInkUi, setMagicInkUi] = useState(false);
 
   const pdfInputRef = useRef<HTMLInputElement>(null);
+  /** Same file as `pendingPdfFile`; updated synchronously so import mode buttons never read a stale closure. */
+  const pendingPdfFileRef = useRef<File | null>(null);
   const apiRef = useRef<ExcalidrawImperativeApiLike | null>(null);
   const socketRef = useRef<Socket | null>(null);
   const saveDebounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -491,6 +574,7 @@ export default function ExcalidrawEditor({
           viewModeEnabled: !canWrite,
           zenModeEnabled: false,
           collaborators: new Map(),
+          ...(canWrite ? { penMode: getExcalidrawPenMode() } : {}),
         };
         if (preserveVp) {
           nextApp.zoom = cur.zoom;
@@ -533,8 +617,10 @@ export default function ExcalidrawEditor({
   const createDocumentSnapshot = useCallback((api: ExcalidrawImperativeApiLike): PersistedDocument => {
     const pageSnapshot = createSnapshot(api);
     const baseDoc = docStateRef.current;
+    const refPageId = activePageIdRef.current;
+    const pageId = baseDoc.pages.some((p) => p.id === refPageId) ? refPageId : (baseDoc.pages[0]?.id ?? refPageId);
     const nextPages = baseDoc.pages.map((page) =>
-      page.id === activePageId
+      page.id === pageId
         ? {
             ...page,
             elements: pageSnapshot.elements,
@@ -545,16 +631,29 @@ export default function ExcalidrawEditor({
     const mergedFiles = { ...baseDoc.files, ...pageSnapshot.files };
     return {
       version: 2,
-      activePageId,
+      activePageId: pageId,
       pages: nextPages,
       files: mergedFiles,
     };
-  }, [activePageId, createSnapshot]);
+  }, [createSnapshot]);
 
   const executeFlushSave = useCallback(
     async (forceOverwrite: boolean) => {
       const api = apiRef.current;
-      if (!api || !canWrite || blockSyncRef.current) return;
+      if (!api || !canWrite) return;
+
+      if (blockSyncRef.current) {
+        for (let i = 0; i < 50 && blockSyncRef.current; i += 1) {
+          await new Promise<void>((r) => {
+            setTimeout(r, 40);
+          });
+        }
+        if (blockSyncRef.current) {
+          setSaveState("unsaved");
+          toast.error("Couldn’t save while the canvas is updating. Try Save again in a moment.", { id: "sheet-save-blocked" });
+          return;
+        }
+      }
 
       setSaveState("saving");
       let snapshot: PersistedDocument | null = null;
@@ -589,18 +688,18 @@ export default function ExcalidrawEditor({
         const savedDoc = snapshot;
 
         const sentPage = savedDoc.pages.find((p) => p.id === savedDoc.activePageId) ?? savedDoc.pages[0];
-        const currentDoc = docStateRef.current;
-        const currentPage = currentDoc.pages.find((p) => p.id === savedDoc.activePageId) ?? currentDoc.pages[0];
+        const liveEls = api.getSceneElements() as unknown as Record<string, unknown>[];
         const sentFingerprint = buildSceneFingerprint(sentPage?.elements ?? []);
-        const currentFingerprint = buildSceneFingerprint(currentPage?.elements ?? []);
-        const hasNewerLocalEdits = sentFingerprint !== currentFingerprint;
+        const liveFingerprint = buildSceneFingerprint(liveEls);
+        const hasNewerLocalEdits = sentFingerprint !== liveFingerprint;
 
         if (!hasNewerLocalEdits) {
           setDocumentState(savedDoc);
           docStateRef.current = savedDoc;
           await writeCachedDocument(sheetId, savedDoc, versionRef.current);
-          sceneFingerprintRef.current = buildSceneFingerprint(api.getSceneElements() as unknown as Record<string, unknown>[]);
+          sceneFingerprintRef.current = liveFingerprint;
           hasLocalUnsavedEditsRef.current = false;
+          setLastServerSaveAtMs(Date.now());
           setSaveState("saved");
           socketRef.current?.emit("sheet:snapshot", { sheetId, snapshot: savedDoc, contentVersion: versionRef.current });
         } else {
@@ -615,6 +714,7 @@ export default function ExcalidrawEditor({
             return merged;
           });
           setSaveState("unsaved");
+          toast.message("Partial save: newer edits on canvas were not overwritten. Save again.", { id: "sheet-save-partial" });
         }
       } catch (err) {
         console.error(err);
@@ -663,6 +763,16 @@ export default function ExcalidrawEditor({
     },
     [executeFlushSave],
   );
+
+  const onManualSave = useCallback(async () => {
+    if (!canWrite || busy !== null) return;
+    hasLocalUnsavedEditsRef.current = true;
+    if (saveDebounceRef.current) {
+      clearTimeout(saveDebounceRef.current);
+      saveDebounceRef.current = null;
+    }
+    await flushSave(false);
+  }, [busy, canWrite, flushSave]);
 
   useEffect(() => {
     mountedRef.current = true;
@@ -715,6 +825,7 @@ export default function ExcalidrawEditor({
     };
   }, [canWrite, flushSave]);
 
+  /** New sheet only: do not tie to contentVersion or a post-save RSC bump clears apiRef while Excalidraw never re-fires excalidrawAPI. */
   useEffect(() => {
     apiRef.current = null;
     hasAppliedInitialRef.current = false;
@@ -722,6 +833,14 @@ export default function ExcalidrawEditor({
     sceneFingerprintRef.current = "";
     versionRef.current = Number.isFinite(contentVersion) ? contentVersion : 0;
     hasLocalUnsavedEditsRef.current = false;
+    // contentVersion: initial server version for the new sheet only (not a dep — avoid reset on version bumps).
+  // eslint-disable-next-line react-hooks/exhaustive-deps -- only reset canvas refs when the note id changes
+  }, [sheetId]);
+
+  /** Same sheet: server version can bump after save + revalidate; keep client in sync without nulling apiRef. */
+  useEffect(() => {
+    if (!Number.isFinite(contentVersion)) return;
+    versionRef.current = Math.max(versionRef.current, contentVersion);
   }, [contentVersion, sheetId]);
 
   useEffect(() => {
@@ -739,6 +858,7 @@ export default function ExcalidrawEditor({
   const handleApiReady = useCallback(
     (api: ExcalidrawImperativeApiLike) => {
       apiRef.current = api;
+      setImperativeEpoch((n) => n + 1);
       if (!hasAppliedInitialRef.current) {
         requestAnimationFrame(() => {
           if (!mountedRef.current || !apiRef.current || hasAppliedInitialRef.current) return;
@@ -752,9 +872,7 @@ export default function ExcalidrawEditor({
           sceneFingerprintRef.current = buildSceneFingerprint(
             apiRef.current.getSceneElements() as unknown as Record<string, unknown>[],
           );
-          setTimeout(() => {
-            autosaveArmedRef.current = true;
-          }, 0);
+          autosaveArmedRef.current = true;
           hasAppliedInitialRef.current = true;
         });
       }
@@ -763,7 +881,7 @@ export default function ExcalidrawEditor({
   );
 
   const onSceneChange = useCallback(() => {
-    if (!canWrite || blockSyncRef.current) return;
+    if (!canWrite) return;
     hasLocalUnsavedEditsRef.current = true;
     setSaveState("unsaved");
     if (saveDebounceRef.current) clearTimeout(saveDebounceRef.current);
@@ -776,6 +894,123 @@ export default function ExcalidrawEditor({
     return api.getAppState() as unknown as Parameters<typeof viewportCoordsToSceneCoords>[1];
   }, []);
 
+  const onInkOcrPendingChange = useCallback((elementIds: readonly string[]) => {
+    setPendingInkOcrIds((prev) => {
+      if (elementIds.length === 0) {
+        return prev.length === 0 ? prev : [];
+      }
+      const next = [...elementIds];
+      if (prev.length === next.length && prev.every((id, i) => next[i] === id)) return prev;
+      return next;
+    });
+  }, []);
+
+  const onMathSuggestion = useCallback(
+    (suggestion: MathSuggestion & { x: number; y: number }) => {
+      if (!inkMathSuggestOn) return;
+      setPendingMathSuggestion(suggestion);
+    },
+    [inkMathSuggestOn],
+  );
+
+  const { openHandwritingModal } = usePencilEnhanced({
+    apiRef,
+    imperativeEpoch,
+    canWrite,
+    pointerAppState,
+    onMathSuggestion,
+    onInkOcrPendingChange,
+    inkOcrArmedRef: magicInkArmedRef,
+  });
+
+  useLayoutEffect(() => {
+    if (pendingInkOcrIds.length === 0) {
+      setPendingInkOcrRects((prev) => (prev.length === 0 ? prev : []));
+      return;
+    }
+    let rafId = 0;
+    let cancelled = false;
+    let lastSig = "";
+
+    const sample = () => {
+      if (cancelled) return;
+      const api = apiRef.current;
+      const next: { id: string; left: number; top: number; width: number; height: number }[] = [];
+      if (api) {
+        const ps = pointerAppState(api);
+        const els = api.getSceneElements() as unknown as Record<string, unknown>[];
+        for (const id of pendingInkOcrIds) {
+          const el = els.find((e) => e.id === id && !Boolean(e.isDeleted));
+          if (!el || el.type !== "freedraw") continue;
+          const x = toFinite(el.x);
+          const y = toFinite(el.y);
+          const w = toFinite(el.width);
+          const h = toFinite(el.height);
+          const sx0 = Math.min(x, x + w);
+          const sy0 = Math.min(y, y + h);
+          const sx1 = Math.max(x, x + w);
+          const sy1 = Math.max(y, y + h);
+          const corners = [
+            { sceneX: sx0, sceneY: sy0 },
+            { sceneX: sx1, sceneY: sy0 },
+            { sceneX: sx1, sceneY: sy1 },
+            { sceneX: sx0, sceneY: sy1 },
+          ];
+          let minVx = Infinity;
+          let minVy = Infinity;
+          let maxVx = -Infinity;
+          let maxVy = -Infinity;
+          for (const c of corners) {
+            const v = sceneCoordsToViewportCoords(c, ps);
+            minVx = Math.min(minVx, v.x);
+            minVy = Math.min(minVy, v.y);
+            maxVx = Math.max(maxVx, v.x);
+            maxVy = Math.max(maxVy, v.y);
+          }
+          if (Number.isFinite(minVx) && Number.isFinite(minVy)) {
+            next.push({
+              id,
+              left: minVx,
+              top: minVy,
+              width: Math.max(1, maxVx - minVx),
+              height: Math.max(1, maxVy - minVy),
+            });
+          }
+        }
+      }
+      const sig = next
+        .map((r) => `${r.id}:${Math.round(r.left)}:${Math.round(r.top)}:${Math.round(r.width)}:${Math.round(r.height)}`)
+        .join("|");
+      if (sig !== lastSig) {
+        lastSig = sig;
+        setPendingInkOcrRects((prev) => {
+          const prevSig = prev
+            .map((r) => `${r.id}:${Math.round(r.left)}:${Math.round(r.top)}:${Math.round(r.width)}:${Math.round(r.height)}`)
+            .join("|");
+          return prevSig === sig ? prev : next;
+        });
+      }
+      rafId = requestAnimationFrame(sample);
+    };
+
+    rafId = requestAnimationFrame(sample);
+    return () => {
+      cancelled = true;
+      cancelAnimationFrame(rafId);
+    };
+  }, [pendingInkOcrIds, imperativeEpoch, pointerAppState]);
+
+  const onPencilOnlyPointerDownCapture = useCallback(
+    (e: React.PointerEvent) => {
+      if (!pencilOnlyOn || !canWrite) return;
+      if (e.pointerType === "touch") {
+        e.preventDefault();
+        e.stopPropagation();
+      }
+    },
+    [pencilOnlyOn, canWrite],
+  );
+
   const onEditorPointerMove = useCallback(
     (e: React.PointerEvent) => {
       if (e.pointerType === "touch") return;
@@ -784,20 +1019,26 @@ export default function ExcalidrawEditor({
       if (!api || !s?.connected) return;
       const now = Date.now();
       const app = api.getAppState() as unknown as { activeTool?: { type?: string } };
-      const isLaser = app.activeTool?.type === "laser";
+      const isLaser = sharePublicLaserMode ? true : app.activeTool?.type === "laser";
       const minMs = isLaser ? 20 : 38;
       if (now - lastCursorEmitRef.current < minMs) return;
       lastCursorEmitRef.current = now;
       const { x, y } = viewportCoordsToSceneCoords({ clientX: e.clientX, clientY: e.clientY }, pointerAppState(api));
-      s.emit("presence:cursor", { sheetId, pageId: activePageIdRef.current, x, y, laser: isLaser });
+      s.emit("presence:cursor", { sheetId, pageId: activePageIdRef.current, x, y, laser: Boolean(isLaser) });
     },
-    [pointerAppState, sheetId],
+    [pointerAppState, sheetId, sharePublicLaserMode],
   );
 
   const onExcalidrawChange = useCallback((elements: readonly unknown[], appState: unknown) => {
       const typedElements = elements.filter(isSceneElement);
       const sceneBounds = getElementBounds(typedElements);
       const appStateObj = isObj(appState) ? appState : {};
+      const activeToolRaw = isObj(appStateObj.activeTool) ? appStateObj.activeTool : {};
+      const toolType = typeof activeToolRaw.type === "string" ? activeToolRaw.type : "";
+      if (magicInkArmedRef.current && toolType !== "freedraw") {
+        magicInkArmedRef.current = false;
+        setMagicInkUi(false);
+      }
       const zoomObj = isObj(appStateObj.zoom) ? appStateObj.zoom : {};
       const zoom = Math.max(0.05, toFinite(zoomObj.value, 1));
       const viewportWidth = Math.max(1, toFinite(appStateObj.width, 1) / zoom);
@@ -871,31 +1112,38 @@ export default function ExcalidrawEditor({
       }
 
       const nextFingerprint = buildSceneFingerprint(typedElements);
+      const fingerprintChanged = nextFingerprint !== sceneFingerprintRef.current;
+      const bumpRemoteCursors = () => {
+        if (Object.keys(remoteCursorsRef.current).length > 0) setCursorRerender((c) => c + 1);
+      };
+
       if (!autosaveArmedRef.current) {
-        sceneFingerprintRef.current = nextFingerprint;
-        if (Object.keys(remoteCursorsRef.current).length > 0) {
-          setCursorRerender((c) => c + 1);
+        if (hasAppliedInitialRef.current && fingerprintChanged && canWrite) {
+          sceneFingerprintRef.current = nextFingerprint;
+          onSceneChange();
+        } else {
+          sceneFingerprintRef.current = nextFingerprint;
         }
+        bumpRemoteCursors();
         return;
       }
       if (Date.now() < ignoreAutosaveUntilRef.current) {
-        sceneFingerprintRef.current = nextFingerprint;
-        if (Object.keys(remoteCursorsRef.current).length > 0) {
-          setCursorRerender((c) => c + 1);
+        if (hasAppliedInitialRef.current && fingerprintChanged && canWrite) {
+          sceneFingerprintRef.current = nextFingerprint;
+          onSceneChange();
+        } else {
+          sceneFingerprintRef.current = nextFingerprint;
         }
+        bumpRemoteCursors();
         return;
       }
-      if (nextFingerprint === sceneFingerprintRef.current) {
-        if (Object.keys(remoteCursorsRef.current).length > 0) {
-          setCursorRerender((c) => c + 1);
-        }
+      if (!fingerprintChanged) {
+        bumpRemoteCursors();
         return;
       }
       sceneFingerprintRef.current = nextFingerprint;
       onSceneChange();
-      if (Object.keys(remoteCursorsRef.current).length > 0) {
-        setCursorRerender((c) => c + 1);
-      }
+      bumpRemoteCursors();
     }, [activePageId, canWrite, onSceneChange, sheetId]);
 
   const onTitleChange = useCallback(
@@ -995,10 +1243,14 @@ export default function ExcalidrawEditor({
 
     const connect = async () => {
       try {
-        const { token } = await getRealtimeToken();
         const cfg = await fetch("/api/realtime-config").then((r) => r.json());
         const url = typeof cfg.url === "string" && cfg.url.trim().length > 0 ? cfg.url.trim() : undefined;
-        const options = { auth: { token, name: userName || "Guest", color: userColor, image: userImage || "" } };
+        const name = userName || "Guest";
+        const auth =
+          shareReadToken && shareReadToken.length > 0
+            ? { shareToken: shareReadToken, sheetId, name, color: userColor, image: userImage || "" }
+            : { token: (await getRealtimeToken()).token, name, color: userColor, image: userImage || "" };
+        const options = { auth };
         socket = url ? io(url, options) : io(options);
         socketRef.current = socket;
         onConnectHandler = () => {
@@ -1286,7 +1538,7 @@ export default function ExcalidrawEditor({
       setMembers({});
       setRemoteCursors({});
     };
-  }, [applyScene, flushSave, sheetId, userColor, userName, userImage]);
+  }, [applyScene, flushSave, sheetId, shareReadToken, userColor, userName, userImage]);
 
   useEffect(() => {
     const flushQueue = async () => {
@@ -1307,6 +1559,7 @@ export default function ExcalidrawEditor({
         }
         queue.shift();
         await localforage.setItem(queueKey(sheetId), queue);
+        if (queue.length === 0) setLastServerSaveAtMs(Date.now());
         setSaveState(queue.length > 0 ? "offlineQueued" : "saved");
       } catch {
         setSaveState("offlineQueued");
@@ -1324,6 +1577,7 @@ export default function ExcalidrawEditor({
       const file = event.target.files?.[0];
       event.target.value = "";
       if (!file || !canWrite) return;
+      pendingPdfFileRef.current = file;
       setPendingPdfFile(file);
       setShowImportModeDialog(true);
     },
@@ -1332,11 +1586,26 @@ export default function ExcalidrawEditor({
 
   const runPdfImport = useCallback(
     async (mode: PdfImportMode) => {
-      const file = pendingPdfFile;
+      const file = pendingPdfFileRef.current;
       const api = apiRef.current;
-      if (!file || !api || !canWrite || !activePage) return;
+      if (!canWrite) return;
+      if (!file) {
+        toast.error("No PDF loaded. Use Import and pick a file again.", { id: "pdf-import-no-file" });
+        return;
+      }
+      if (docStateRef.current.pages.length === 0) {
+        toast.error("This note has no pages — cannot import a PDF.", { id: "pdf-import-no-pages" });
+        return;
+      }
+      if (!api) {
+        toast.error("Canvas is still loading. Wait a moment, then tap your import option again.", {
+          id: "pdf-import-no-api",
+        });
+        return;
+      }
       setShowImportModeDialog(false);
       setPendingPdfFile(null);
+      pendingPdfFileRef.current = null;
       setBusy("import");
       try {
         if (mode === "stackCurrent") {
@@ -1393,7 +1662,7 @@ export default function ExcalidrawEditor({
         setBusy(null);
       }
     },
-    [activePage, activePageId, canWrite, flushSave, pendingPdfFile],
+    [activePageId, canWrite, flushSave],
   );
 
   const runPdfExport = useCallback(async (mode: PdfExportMode) => {
@@ -1429,18 +1698,61 @@ export default function ExcalidrawEditor({
   const onResetView = useCallback(() => {
     const api = apiRef.current;
     if (!api) return;
+    const cur = api.getAppState();
     api.updateScene({
       appState: {
-        ...api.getAppState(),
+        ...cur,
         viewModeEnabled: !canWrite,
         zenModeEnabled: false,
         zoom: { value: 1 },
         scrollX: 0,
         scrollY: 0,
+        penMode: canWrite ? getExcalidrawPenMode() : false,
       } as Parameters<ExcalidrawImperativeApiLike["updateScene"]>[0]["appState"],
     });
     toast.success("View reset.");
   }, [canWrite]);
+
+  /** Excalidraw often does not treat two-finger pinch as zoom while freedraw is active; these work in any tool. */
+  const onToggleMagicInk = useCallback(() => {
+    if (!canWrite || busy !== null) return;
+    if (!getInkToTextModeEnabled()) {
+      toast.message("Turn on “Magic ink” in Apple Pencil settings first.");
+      return;
+    }
+    const next = !magicInkArmedRef.current;
+    magicInkArmedRef.current = next;
+    setMagicInkUi(next);
+    if (next) {
+      const api = apiRef.current;
+      if (api) setActiveToolFreedraw(api);
+    }
+  }, [busy, canWrite]);
+
+  const onZoomStep = useCallback((direction: 1 | -1) => {
+    const api = apiRef.current;
+    if (!api) return;
+    const cur = api.getAppState();
+    const zoomObj = cur.zoom as unknown as { value?: number };
+    const z = typeof zoomObj?.value === "number" && Number.isFinite(zoomObj.value) ? zoomObj.value : 1;
+    const factor = 1.15;
+    const next = direction === 1 ? z * factor : z / factor;
+    const clamped = Math.min(16, Math.max(0.1, next));
+    api.updateScene({
+      appState: {
+        ...cur,
+        zoom: { value: clamped },
+      } as Parameters<ExcalidrawImperativeApiLike["updateScene"]>[0]["appState"],
+    });
+  }, []);
+
+  const onInsertMathSuggestion = useCallback(() => {
+    const api = apiRef.current;
+    const suggestion = pendingMathSuggestion;
+    if (!api || !suggestion || !canWrite) return;
+    insertHandwrittenTextAtScenePoint(api, `= ${suggestion.result}`, suggestion.x, suggestion.y, { fontSize: 24 });
+    setPendingMathSuggestion(null);
+  }, [canWrite, pendingMathSuggestion]);
 
   const onToggleExcalidrawTheme = useCallback(() => {
     const api = apiRef.current;
@@ -1531,20 +1843,34 @@ export default function ExcalidrawEditor({
 
   const busyLabel = busy === "import" ? "Importing PDF..." : busy === "export" ? "Exporting PDF..." : "";
   const saveStateMeta = useMemo(() => {
+    const timeFmt = (ms: number) =>
+      new Date(ms).toLocaleString(undefined, { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" });
+
     if (!canWrite) {
       return { label: "View only", dotClass: "bg-gray-400/90" };
     }
     if (saveState === "saving") {
-      return { label: "Saving...", dotClass: "bg-blue-500" };
+      return { label: "Saving to server…", dotClass: "bg-blue-500" };
     }
     if (saveState === "offlineQueued" || !isOnline) {
-      return { label: "Offline queue", dotClass: "bg-amber-500" };
+      return { label: "Queued offline — will sync when online", dotClass: "bg-amber-500" };
     }
     if (saveState === "unsaved") {
-      return { label: "Not saved", dotClass: "bg-red-500" };
+      return {
+        label: lastServerSaveAtMs
+          ? `Unsaved changes (last on server ${timeFmt(lastServerSaveAtMs)})`
+          : "Unsaved — not written to server yet",
+        dotClass: "bg-red-500",
+      };
     }
-    return { label: "Saved", dotClass: "bg-emerald-500" };
-  }, [canWrite, isOnline, saveState]);
+    if (lastServerSaveAtMs) {
+      return {
+        label: `On server · ${timeFmt(lastServerSaveAtMs)}`,
+        dotClass: "bg-emerald-500",
+      };
+    }
+    return { label: "In sync (open)", dotClass: "bg-emerald-500" };
+  }, [canWrite, isOnline, lastServerSaveAtMs, saveState]);
   const minimapView = useMemo(() => {
     const viewport = minimapState.viewport;
     if (!viewport) return null;
@@ -1586,8 +1912,23 @@ export default function ExcalidrawEditor({
         onChange={onImportPdf}
       />
 
-      <div className="absolute inset-0" onPointerMove={onEditorPointerMove}>
+      <div
+        className="absolute inset-0"
+        onPointerMove={onEditorPointerMove}
+        onPointerDownCapture={onPencilOnlyPointerDownCapture}
+      >
         <ExcalidrawCanvas excalidrawAPI={handleApiReady} onChange={onExcalidrawChange} viewModeEnabled={!canWrite} />
+        {pendingInkOcrRects.length > 0 ? (
+          <div className="pointer-events-none absolute inset-0 z-8" aria-hidden>
+            {pendingInkOcrRects.map((r) => (
+              <div
+                key={r.id}
+                className="absolute rounded-md border-2 border-(--color-accent) opacity-85 shadow-sm animate-pulse"
+                style={{ left: r.left, top: r.top, width: r.width, height: r.height }}
+              />
+            ))}
+          </div>
+        ) : null}
         {Object.keys(remoteCursors).length > 0 ? (
           <div key={cursorRerender} className="pointer-events-none absolute inset-0 z-10" aria-hidden>
             {(() => {
@@ -1649,6 +1990,39 @@ export default function ExcalidrawEditor({
             })()}
           </div>
         ) : null}
+        {canWrite ? (
+          <div
+            className="pointer-events-auto absolute z-21 max-w-[min(18rem,calc(100vw-5rem))]"
+            style={{
+              top: "max(0.75rem, env(safe-area-inset-top, 0px))",
+              right: "max(0.75rem, env(safe-area-inset-right, 0px))",
+            }}
+          >
+            <button
+              type="button"
+              disabled={busy !== null}
+              onClick={onToggleMagicInk}
+              aria-pressed={magicInkUi}
+              aria-label="Ink OCR pen — tap, then draw; stroke becomes text on pen-up"
+              title={
+                inkToTextOn
+                  ? "Ink OCR — tap to arm, draw with the pen, release to convert to text. Tap again to turn off. The normal Excalidraw pen does not OCR."
+                  : "Turn on “Magic ink (OCR)” in Apple Pencil settings (gear), then use this tool."
+              }
+              className={`glass-thick flex max-w-full items-center gap-2 rounded-2xl border border-(--glass-border) px-3 py-2 text-left text-xs font-semibold shadow-lg backdrop-blur-xl disabled:opacity-50 ${
+                magicInkUi ? "bg-(--color-accent)/15 text-(--color-accent) ring-2 ring-(--color-accent)/40" : "text-(--text-primary)"
+              } ${!inkToTextOn ? "opacity-60" : ""}`}
+            >
+              <Wand2 className="h-4 w-4 shrink-0" aria-hidden />
+              <span className="min-w-0 leading-tight">
+                <span className="block font-bold">Ink OCR</span>
+                <span className="mt-0.5 block text-[10px] font-normal text-(--text-muted)">
+                  {magicInkUi ? "On — draw to convert" : inkToTextOn ? "Tap to turn on" : "Enable in pencil settings"}
+                </span>
+              </span>
+            </button>
+          </div>
+        ) : null}
       </div>
 
       <div className="pointer-events-none absolute inset-0 z-20">
@@ -1669,13 +2043,25 @@ export default function ExcalidrawEditor({
                 placeholder="Untitled Note"
                 spellCheck={false}
               />
+              {canWrite ? (
+                <button
+                  type="button"
+                  onClick={() => void onManualSave()}
+                  disabled={busy !== null || saveState === "saving"}
+                  className="inline-flex shrink-0 items-center gap-1.5 rounded-full bg-(--color-accent) px-3 py-1.5 text-[11px] font-bold text-white shadow-sm hover:opacity-95 disabled:opacity-50"
+                  title="Save this note to the database now (same as autosave, but immediate)"
+                >
+                  <Save className="h-3.5 w-3.5" aria-hidden />
+                  <span>Save now</span>
+                </button>
+              ) : null}
               <span
-                className="inline-flex shrink-0 items-center gap-2 rounded-full bg-black/5 px-2 py-1 text-[11px] font-semibold dark:bg-white/10"
+                className="inline-flex min-w-0 max-w-[min(14rem,42vw)] shrink-0 items-center gap-2 rounded-full bg-black/5 px-2 py-1 text-[11px] font-semibold dark:bg-white/10 md:max-w-[min(22rem,50vw)]"
                 title={saveStateMeta.label}
                 aria-live="polite"
               >
-                <span className={`h-2.5 w-2.5 rounded-full ${saveStateMeta.dotClass}`} />
-                <span className="hidden sm:inline">{saveStateMeta.label}</span>
+                <span className={`h-2.5 w-2.5 shrink-0 rounded-full ${saveStateMeta.dotClass}`} />
+                <span className="truncate">{saveStateMeta.label}</span>
               </span>
             </div>
             {membersGrouped.length > 0 ? (
@@ -1703,6 +2089,27 @@ export default function ExcalidrawEditor({
                     )}
                   </div>
                 ))}
+              </div>
+            ) : null}
+            {pendingMathSuggestion ? (
+              <div className="mt-2 flex items-center gap-2 rounded-xl bg-black/5 px-2 py-1.5 text-[11px] dark:bg-white/10">
+                <span className="min-w-0 flex-1 truncate" title={pendingMathSuggestion.original}>
+                  {pendingMathSuggestion.expression} = {pendingMathSuggestion.result}
+                </span>
+                <button
+                  type="button"
+                  className="rounded-lg bg-(--color-accent) px-2 py-1 text-[10px] font-semibold text-white"
+                  onClick={onInsertMathSuggestion}
+                >
+                  Insert
+                </button>
+                <button
+                  type="button"
+                  className="rounded-lg px-2 py-1 text-[10px] font-semibold hover:bg-black/10 dark:hover:bg-white/10"
+                  onClick={() => setPendingMathSuggestion(null)}
+                >
+                  Dismiss
+                </button>
               </div>
             ) : null}
 
@@ -1736,19 +2143,38 @@ export default function ExcalidrawEditor({
                 </button>
                 <button
                   type="button"
+                  onClick={() => onZoomStep(-1)}
+                  className="inline-flex h-9 w-9 items-center justify-center rounded-xl hover:bg-black/5 dark:hover:bg-white/10"
+                  aria-label="Zoom out"
+                  title="Zoom out (helps on iPad when pinch does not zoom in pen mode)"
+                >
+                  <ZoomOut className="h-4 w-4" />
+                </button>
+                <button
+                  type="button"
+                  onClick={() => onZoomStep(1)}
+                  className="inline-flex h-9 w-9 items-center justify-center rounded-xl hover:bg-black/5 dark:hover:bg-white/10"
+                  aria-label="Zoom in"
+                  title="Zoom in"
+                >
+                  <ZoomIn className="h-4 w-4" />
+                </button>
+                <button
+                  type="button"
                   onClick={onResetView}
                   className="inline-flex h-9 w-9 items-center justify-center rounded-xl hover:bg-black/5 dark:hover:bg-white/10"
                   aria-label="Reset view"
                 >
                   <RefreshCcw className="h-4 w-4" />
                 </button>
-                <Link
-                  href="/settings"
+                <button
+                  type="button"
+                  onClick={() => setPencilSettingsOpen(true)}
                   className="inline-flex h-9 w-9 items-center justify-center rounded-xl hover:bg-black/5 dark:hover:bg-white/10"
-                  aria-label="Settings"
+                  aria-label="Apple Pencil settings"
                 >
                   <Settings className="h-4 w-4" />
-                </Link>
+                </button>
                 {showSharePanel ? (
                   <button
                     type="button"
@@ -1871,21 +2297,207 @@ export default function ExcalidrawEditor({
         ) : null}
 
         {showImportModeDialog ? (
-          <div className="pointer-events-auto fixed inset-0 flex items-center justify-center p-6">
-            <div className="absolute inset-0 bg-black/55 backdrop-blur-sm" onClick={() => setShowImportModeDialog(false)} aria-hidden />
-            <div className="relative w-full max-w-md rounded-3xl border border-white/20 bg-[color-mix(in_srgb,var(--bg-surface)_95%,transparent)] p-6 shadow-2xl backdrop-blur-xl">
-              <h3 className="text-base font-semibold">Import PDF</h3>
+          <div className="pointer-events-auto fixed inset-0 z-100 flex items-center justify-center p-6">
+            <div
+              className="absolute inset-0 bg-black/55 backdrop-blur-sm"
+              onClick={() => {
+                setShowImportModeDialog(false);
+                setPendingPdfFile(null);
+                pendingPdfFileRef.current = null;
+              }}
+              aria-hidden
+            />
+            <div
+              className="relative z-1 w-full max-w-md touch-manipulation rounded-3xl border border-white/20 bg-[color-mix(in_srgb,var(--bg-surface)_95%,transparent)] p-6 shadow-2xl backdrop-blur-xl"
+              onPointerDown={(e) => e.stopPropagation()}
+              role="dialog"
+              aria-modal="true"
+              aria-labelledby="pdf-import-title"
+            >
+              <h3 id="pdf-import-title" className="text-base font-semibold">
+                Import PDF
+              </h3>
               <p className="mt-1 text-sm text-(--text-muted)">Choose how PDF pages should be placed in this note.</p>
               <div className="mt-4 space-y-2">
-                <button type="button" className="w-full rounded-xl bg-black/5 px-3 py-2 text-left text-sm font-semibold hover:bg-black/10 dark:bg-white/10 dark:hover:bg-white/15" onClick={() => void runPdfImport("perPage")}>
+                <button
+                  type="button"
+                  className="w-full touch-manipulation rounded-xl bg-black/5 px-3 py-2 text-left text-sm font-semibold hover:bg-black/10 active:bg-black/15 dark:bg-white/10 dark:hover:bg-white/15 dark:active:bg-white/20"
+                  onClick={() => void runPdfImport("perPage")}
+                >
                   Create one note page per PDF page
                 </button>
-                <button type="button" className="w-full rounded-xl bg-black/5 px-3 py-2 text-left text-sm font-semibold hover:bg-black/10 dark:bg-white/10 dark:hover:bg-white/15" onClick={() => void runPdfImport("stackCurrent")}>
+                <button
+                  type="button"
+                  className="w-full touch-manipulation rounded-xl bg-black/5 px-3 py-2 text-left text-sm font-semibold hover:bg-black/10 active:bg-black/15 dark:bg-white/10 dark:hover:bg-white/15 dark:active:bg-white/20"
+                  onClick={() => void runPdfImport("stackCurrent")}
+                >
                   Stack all PDF pages on current page
                 </button>
-                <button type="button" className="w-full rounded-xl bg-black/5 px-3 py-2 text-left text-sm font-semibold hover:bg-black/10 dark:bg-white/10 dark:hover:bg-white/15" onClick={() => void runPdfImport("stackNew")}>
+                <button
+                  type="button"
+                  className="w-full touch-manipulation rounded-xl bg-black/5 px-3 py-2 text-left text-sm font-semibold hover:bg-black/10 active:bg-black/15 dark:bg-white/10 dark:hover:bg-white/15 dark:active:bg-white/20"
+                  onClick={() => void runPdfImport("stackNew")}
+                >
                   Stack all PDF pages on a new note page
                 </button>
+              </div>
+            </div>
+          </div>
+        ) : null}
+
+        {pencilSettingsOpen ? (
+          <div className="pointer-events-auto fixed inset-0 flex items-center justify-center p-6">
+            <div className="absolute inset-0 bg-black/55 backdrop-blur-sm" onClick={() => setPencilSettingsOpen(false)} aria-hidden />
+            <div className="relative w-full max-w-md rounded-3xl border border-white/20 bg-[color-mix(in_srgb,var(--bg-surface)_95%,transparent)] p-6 shadow-2xl backdrop-blur-xl">
+              <div className="flex items-center justify-between gap-2">
+                <h3 className="text-base font-semibold">Apple Pencil settings</h3>
+                <button
+                  type="button"
+                  className="rounded-xl px-3 py-1.5 text-sm font-semibold hover:bg-black/5 dark:hover:bg-white/10"
+                  onClick={() => setPencilSettingsOpen(false)}
+                >
+                  Close
+                </button>
+              </div>
+              <div className="mt-3 flex flex-col gap-1.5 rounded-xl bg-black/5 px-2 py-2 dark:bg-white/10">
+                <label className="flex flex-col gap-0.5 text-[11px] font-semibold">
+                  <span className="text-(--text-muted)">Double-tap</span>
+                  <select
+                    className="rounded-lg border border-white/15 bg-transparent px-2 py-1 text-xs outline-none"
+                    disabled={!canWrite}
+                    value={pencilDoubleTapSetting}
+                    onChange={(e) => {
+                      const v = e.target.value as PencilDoubleTapAction;
+                      setPencilDoubleTapAction(v);
+                      setPencilDoubleTapSetting(v);
+                    }}
+                  >
+                    <option value="toggleEraser">Toggle pen / eraser</option>
+                    <option value="undo">Undo</option>
+                    <option value="handwriting">Handwriting → text</option>
+                    <option value="none">No action</option>
+                  </select>
+                </label>
+                <button
+                  type="button"
+                  disabled={!canWrite || busy !== null}
+                  onClick={() => void openHandwritingModal()}
+                  className="inline-flex min-h-[32px] items-center justify-center gap-1.5 rounded-xl bg-black/10 px-2 text-xs font-semibold hover:bg-black/15 disabled:opacity-50 dark:bg-white/15 dark:hover:bg-white/20"
+                >
+                  <PenLine className="h-3.5 w-3.5" />
+                  Write → text
+                </button>
+                <label className="flex cursor-pointer items-center gap-2 text-[11px] font-semibold">
+                  <input
+                    type="checkbox"
+                    checked={scribbleEraseOn}
+                    disabled={!canWrite}
+                    onChange={(e) => {
+                      const on = e.target.checked;
+                      setScribbleEraseEnabled(on);
+                      setScribbleEraseOn(on);
+                    }}
+                  />
+                  Scribble erase gesture
+                </label>
+                <label className="flex cursor-pointer items-center gap-2 text-[11px] font-semibold">
+                  <input
+                    type="checkbox"
+                    checked={inkToTextOn}
+                    disabled={!canWrite}
+                    onChange={(e) => {
+                      const on = e.target.checked;
+                      setInkToTextModeEnabled(on);
+                      setInkToTextOn(on);
+                      if (!on) {
+                        magicInkArmedRef.current = false;
+                        setMagicInkUi(false);
+                      }
+                    }}
+                  />
+                  Magic ink (OCR) — allow the wand tool on the canvas bar
+                </label>
+                <p className="text-[10px] text-(--text-muted)">
+                  Use the wand next to zoom to draw with freedraw and convert strokes to text. The normal Excalidraw pen does not run OCR.
+                </p>
+                <label className="flex cursor-pointer items-center gap-2 text-[11px] font-semibold">
+                  <input
+                    type="checkbox"
+                    checked={inkMathSuggestOn}
+                    disabled={!canWrite}
+                    onChange={(e) => {
+                      const on = e.target.checked;
+                      setInkMathSuggestionEnabled(on);
+                      setInkMathSuggestOn(on);
+                    }}
+                  />
+                  Equation suggestion after "="
+                </label>
+                <label className="flex cursor-pointer items-center gap-2 text-[11px] font-semibold">
+                  <input
+                    type="checkbox"
+                    checked={useTesseractFallback}
+                    disabled={!canWrite}
+                    onChange={(e) => {
+                      const on = e.target.checked;
+                      setUseTesseractFallback(on);
+                      setUseTesseractFallbackState(on);
+                    }}
+                  />
+                  Web fallback OCR: use Tesseract.js
+                </label>
+                <label className="flex flex-col gap-0.5 text-[11px] font-semibold">
+                  <span className="text-(--text-muted)">OCR locale (default: hu-HU)</span>
+                  <input
+                    value={ocrLocale}
+                    disabled={!canWrite}
+                    spellCheck={false}
+                    autoCorrect="off"
+                    autoCapitalize="off"
+                    className="rounded-lg border border-white/15 bg-transparent px-2 py-1 text-xs outline-none"
+                    placeholder="hu-HU"
+                    onChange={(e) => {
+                      const next = e.target.value;
+                      setOcrLocale(next);
+                      setOcrLocaleState(next);
+                    }}
+                  />
+                </label>
+                <label className="flex cursor-pointer items-center gap-2 text-[11px] font-semibold">
+                  <input
+                    type="checkbox"
+                    checked={pencilOnlyOn}
+                    disabled={!canWrite}
+                    onChange={(e) => {
+                      const on = e.target.checked;
+                      setPencilOnlyInput(on);
+                      setPencilOnlyOn(on);
+                    }}
+                  />
+                  Pencil-only (block finger paint)
+                </label>
+                <label className="flex cursor-pointer items-center gap-2 text-[11px] font-semibold">
+                  <input
+                    type="checkbox"
+                    checked={excalidrawPenModeOn}
+                    disabled={!canWrite}
+                    onChange={(e) => {
+                      const on = e.target.checked;
+                      setExcalidrawPenMode(on);
+                      setExcalidrawPenModeOn(on);
+                      const api = apiRef.current;
+                      if (api) {
+                        const cur = api.getAppState();
+                        api.updateScene({
+                          appState: { ...cur, penMode: on } as Parameters<
+                            ExcalidrawImperativeApiLike["updateScene"]
+                          >[0]["appState"],
+                        });
+                      }
+                    }}
+                  />
+                  Excalidraw pen mode
+                </label>
               </div>
             </div>
           </div>

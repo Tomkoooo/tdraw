@@ -10,6 +10,7 @@ import { generateInviteToken, sha256Hex } from "@/lib/inviteTokens";
 import { sendInviteEmail } from "@/lib/email/sendInviteEmail";
 import { revalidatePath } from "next/cache";
 import Sheet from "@/lib/models/Sheet";
+import SheetPublicLink from "@/lib/models/SheetPublicLink";
 import type { SheetShareRole } from "@/lib/models/SheetInvitation";
 
 function defaultInviteTtlHours() {
@@ -21,6 +22,11 @@ function defaultInviteTtlHours() {
 function clampInviteTtlHours(requested?: number) {
   if (requested == null || !Number.isFinite(requested)) return defaultInviteTtlHours();
   return Math.min(168, Math.max(1, Math.round(requested)));
+}
+
+function clampPublicShareTtlHours(requested?: number) {
+  if (requested == null || !Number.isFinite(requested)) return defaultInviteTtlHours();
+  return Math.min(720, Math.max(1, Math.round(requested)));
 }
 
 export type CreateSheetInviteResult = {
@@ -273,6 +279,133 @@ export async function listSheetInvites(
   const items = includeExpired ? mapped : mapped.filter((m) => m.status !== "expired");
 
   return { items, hiddenExpiredCount: includeExpired ? 0 : hiddenExpiredCount };
+}
+
+export type SheetPublicLinkListItem = {
+  id: string;
+  expiresAt: string | null;
+  createdAt: string;
+  revokedAt: string | null;
+  active: boolean;
+};
+
+/** Read-only note payload for anonymous `/share/sheet/[token]` (no session). */
+export async function getSheetForPublicShareToken(rawToken: string) {
+  await dbConnect();
+  const now = new Date();
+  const link = await SheetPublicLink.findOne({
+    tokenHash: sha256Hex(rawToken),
+    revokedAt: null,
+    $or: [{ expiresAt: null }, { expiresAt: { $gt: now } }],
+  }).lean();
+  if (!link) return null;
+
+  const sheet = await Sheet.findById(link.sheetId).lean();
+  if (!sheet || sheet.deletedAt) return null;
+
+  return {
+    _id: sheet._id.toString(),
+    title: sheet.title,
+    canvasState: sheet.canvasState,
+    updatedAt: sheet.updatedAt ? new Date(sheet.updatedAt).toISOString() : new Date().toISOString(),
+    createdAt: sheet.createdAt ? new Date(sheet.createdAt).toISOString() : new Date().toISOString(),
+    contentVersion: sheet.contentVersion ?? 0,
+    organizationId: sheet.organizationId ? String(sheet.organizationId) : null,
+    folderId: sheet.folderId ? String(sheet.folderId) : null,
+    approxBytes: typeof sheet.approxBytes === "number" ? sheet.approxBytes : 0,
+    inTrash: false,
+    canWrite: false,
+    canTitle: false,
+  };
+}
+
+export async function createSheetPublicLink(
+  sheetId: string,
+  opts: { neverExpires?: boolean; ttlHours?: number },
+): Promise<{ url: string; rawToken: string; expiresAt: string | null }> {
+  const session = await auth();
+  if (!session?.user?.id) throw new Error("Unauthorized");
+  await dbConnect();
+  try {
+    await requireSheetPermission(session.user.id, sheetId, "share");
+  } catch (e) {
+    if (e instanceof Error && e.message === "Forbidden") {
+      throw new Error("You don’t have permission to create a public link for this note.");
+    }
+    throw e;
+  }
+
+  const { raw, hash } = generateInviteToken();
+  const neverExpires = Boolean(opts.neverExpires);
+  const expiresAt = neverExpires
+    ? null
+    : new Date(Date.now() + clampPublicShareTtlHours(opts.ttlHours) * 3600 * 1000);
+
+  await SheetPublicLink.create({
+    sheetId: new mongoose.Types.ObjectId(sheetId),
+    tokenHash: hash,
+    expiresAt,
+    revokedAt: null,
+    createdByUserId: new mongoose.Types.ObjectId(session.user.id),
+  });
+
+  const base = process.env.NEXTAUTH_URL || process.env.VERCEL_URL || "http://localhost:3000";
+  const origin = base.startsWith("http") ? base : `https://${base}`;
+  const url = `${origin}/share/sheet/${raw}`;
+
+  revalidatePath(`/sheet/${sheetId}`);
+  return {
+    url,
+    rawToken: raw,
+    expiresAt: expiresAt ? expiresAt.toISOString() : null,
+  };
+}
+
+export async function listSheetPublicLinks(sheetId: string): Promise<SheetPublicLinkListItem[]> {
+  const session = await auth();
+  if (!session?.user?.id) throw new Error("Unauthorized");
+  await dbConnect();
+  await requireSheetPermission(session.user.id, sheetId, "share");
+
+  const rows = await SheetPublicLink.find({ sheetId: new mongoose.Types.ObjectId(sheetId) })
+    .select("_id expiresAt revokedAt createdAt")
+    .sort({ createdAt: -1 })
+    .limit(40)
+    .lean();
+
+  const now = new Date();
+  return rows.map((r) => {
+    const revokedAt = r.revokedAt ?? null;
+    const expiredByTtl = r.expiresAt != null && r.expiresAt <= now;
+    const active = !revokedAt && !expiredByTtl;
+    return {
+      id: String(r._id),
+      expiresAt: r.expiresAt ? r.expiresAt.toISOString() : null,
+      createdAt: (r.createdAt ?? r.expiresAt ?? now).toISOString(),
+      revokedAt: revokedAt ? revokedAt.toISOString() : null,
+      active,
+    };
+  });
+}
+
+export async function revokeSheetPublicLink(sheetId: string, linkId: string) {
+  const session = await auth();
+  if (!session?.user?.id) throw new Error("Unauthorized");
+  await dbConnect();
+  await requireSheetPermission(session.user.id, sheetId, "share");
+
+  const res = await SheetPublicLink.findOneAndUpdate(
+    {
+      _id: new mongoose.Types.ObjectId(linkId),
+      sheetId: new mongoose.Types.ObjectId(sheetId),
+      revokedAt: null,
+    },
+    { $set: { revokedAt: new Date() } },
+    { new: true },
+  );
+  if (!res) throw new Error("Link not found or already revoked");
+
+  revalidatePath(`/sheet/${sheetId}`);
 }
 
 /** Verify raw token for invite page (does not accept). */

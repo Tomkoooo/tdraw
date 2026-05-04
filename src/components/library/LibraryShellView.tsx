@@ -278,7 +278,7 @@ export default function LibraryShellView(v: LibraryShellViewProps) {
       return true;
     };
     if (v.node === "drive" && !v.orgId && !v.folderId) return v.pTree.filter((f) => !f.parentFolderId);
-    if (v.node === "org" && v.orgId && v.curOrgTree) return v.curOrgTree.filter((f) => !f.parentFolderId);
+    if (v.node === "org" && v.orgId && v.curOrgTree && !v.folderId) return v.curOrgTree.filter((f) => !f.parentFolderId);
     if (v.node === "drive" && v.orgId == null && v.folderId) {
       return v.pTree.filter(isValidDirectChild);
     }

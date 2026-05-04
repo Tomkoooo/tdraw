@@ -3,10 +3,14 @@
 import { useCallback, useEffect, useState } from "react";
 import {
   createSheetInvite,
+  createSheetPublicLink,
   listSheetInvites,
+  listSheetPublicLinks,
+  revokeSheetPublicLink,
   type CreateSheetInviteResult,
+  type SheetPublicLinkListItem,
 } from "@/lib/actions/share";
-import { Loader2, Mail } from "lucide-react";
+import { Link2, Loader2, Mail, Trash2 } from "lucide-react";
 import UserAvatar from "@/components/UserAvatar";
 import InviteListPanel from "@/components/InviteListPanel";
 import { toast } from "sonner";
@@ -19,6 +23,13 @@ const TTL_OPTIONS = [
   { h: 48, label: "48h" },
   { h: 72, label: "3d" },
   { h: 168, label: "7d" },
+] as const;
+
+const PUBLIC_TTL_OPTIONS = [
+  { h: 1, label: "1h" },
+  { h: 24, label: "24h" },
+  { h: 168, label: "7d" },
+  { h: 720, label: "30d" },
 ] as const;
 
 const chipBase =
@@ -50,6 +61,15 @@ export default function SheetShareForm({
   const [hiddenExpiredCount, setHiddenExpiredCount] = useState(0);
   const [invitesLoading, setInvitesLoading] = useState(true);
   const [invitesError, setInvitesError] = useState<string | null>(null);
+
+  const [publicNeverExpires, setPublicNeverExpires] = useState(false);
+  const [publicTtlHours, setPublicTtlHours] = useState<number>(168);
+  const [publicBusy, setPublicBusy] = useState(false);
+  const [publicMsg, setPublicMsg] = useState<string | null>(null);
+  const [publicLinks, setPublicLinks] = useState<SheetPublicLinkListItem[]>([]);
+  const [publicLinksLoading, setPublicLinksLoading] = useState(true);
+  const [publicLinksError, setPublicLinksError] = useState<string | null>(null);
+  const [publicLinksRefresh, setPublicLinksRefresh] = useState(0);
 
   const loadInvites = useCallback(
     async (signal?: AbortSignal) => {
@@ -83,9 +103,83 @@ export default function SheetShareForm({
     };
   }, [loadInvites, inviteRefresh]);
 
+  const loadPublicLinks = useCallback(
+    async (signal?: AbortSignal) => {
+      setPublicLinksLoading(true);
+      setPublicLinksError(null);
+      try {
+        const rows = await listSheetPublicLinks(sheetId);
+        if (signal?.aborted) return;
+        setPublicLinks(rows);
+      } catch (err: unknown) {
+        if (signal?.aborted) return;
+        setPublicLinksError(readActionErrorMessage(err));
+      } finally {
+        if (!signal?.aborted) setPublicLinksLoading(false);
+      }
+    },
+    [sheetId],
+  );
+
+  useEffect(() => {
+    const ac = new AbortController();
+    const tid = setTimeout(() => {
+      void loadPublicLinks(ac.signal);
+    }, 0);
+    return () => {
+      ac.abort();
+      clearTimeout(tid);
+    };
+  }, [loadPublicLinks, publicLinksRefresh]);
+
   const trimmed = email.trim();
   const emailLooksValid = /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(trimmed);
   const canSubmit = !busy && emailLooksValid;
+
+  const createPublic = async () => {
+    setPublicBusy(true);
+    setPublicMsg(null);
+    try {
+      const res = await createSheetPublicLink(sheetId, {
+        neverExpires: publicNeverExpires,
+        ttlHours: publicNeverExpires ? undefined : publicTtlHours,
+      });
+      const line = publicNeverExpires
+        ? "Public link created (does not expire). Copy it below."
+        : `Public link created (expires ${res.expiresAt ? new Date(res.expiresAt).toLocaleString() : ""}).`;
+      setPublicMsg(line);
+      toast.success(line, { id: "sheet-public-link", duration: 8000 });
+      try {
+        await navigator.clipboard.writeText(res.url);
+        toast.message("Copied to clipboard", { id: "sheet-public-link-copy", duration: 4000 });
+      } catch {
+        /* clipboard may be denied */
+      }
+      setPublicLinksRefresh((n) => n + 1);
+    } catch (err: unknown) {
+      const m = readActionErrorMessage(err);
+      setPublicMsg(m);
+      toast.error(m, { id: "sheet-public-link-err", duration: 10_000 });
+    } finally {
+      setPublicBusy(false);
+    }
+  };
+
+  const revokePublic = async (linkId: string) => {
+    setPublicBusy(true);
+    setPublicMsg(null);
+    try {
+      await revokeSheetPublicLink(sheetId, linkId);
+      toast.success("Public link revoked.", { id: "sheet-public-revoke" });
+      setPublicLinksRefresh((n) => n + 1);
+    } catch (err: unknown) {
+      const m = readActionErrorMessage(err);
+      setPublicMsg(m);
+      toast.error(m, { id: "sheet-public-revoke-err", duration: 8000 });
+    } finally {
+      setPublicBusy(false);
+    }
+  };
 
   const submit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -145,6 +239,99 @@ export default function SheetShareForm({
           </div>
         </div>
       )}
+      <div className="flex items-center gap-2 text-sm font-semibold text-[var(--color-text)]">
+        <Link2 className="h-4 w-4 text-[var(--color-accent)]" />
+        Public read-only link
+      </div>
+      <p className="text-xs leading-relaxed text-gray-600 dark:text-gray-400">
+        Anyone with the link can open this note without signing in. They can follow live updates and use the laser;
+        they cannot edit the canvas.
+      </p>
+      <label className="flex cursor-pointer items-center gap-3 text-sm text-gray-600 dark:text-gray-400">
+        <input
+          type="checkbox"
+          checked={publicNeverExpires}
+          onChange={(e) => setPublicNeverExpires(e.target.checked)}
+          disabled={publicBusy}
+          className="h-4 w-4 cursor-pointer rounded border-gray-300 disabled:cursor-not-allowed disabled:opacity-45"
+        />
+        Link never expires
+      </label>
+      {!publicNeverExpires ? (
+        <div>
+          <p className="mb-2 text-xs font-semibold uppercase tracking-wide text-gray-500 dark:text-gray-400">
+            Expires in
+          </p>
+          <div className="flex flex-wrap gap-2">
+            {PUBLIC_TTL_OPTIONS.map(({ h, label }) => (
+              <button
+                key={h}
+                type="button"
+                onClick={() => setPublicTtlHours(h)}
+                disabled={publicBusy}
+                className={`${ttlChipBase} disabled:cursor-not-allowed disabled:opacity-45 ${
+                  publicTtlHours === h
+                    ? "bg-[var(--color-accent)] text-white shadow-sm hover:brightness-110"
+                    : "glass-panel hover:bg-black/[0.06] dark:hover:bg-white/[0.08]"
+                }`}
+              >
+                {label}
+              </button>
+            ))}
+          </div>
+        </div>
+      ) : null}
+      <button
+        type="button"
+        onClick={() => void createPublic()}
+        disabled={publicBusy}
+        className="inline-flex min-h-[48px] cursor-pointer items-center justify-center gap-2 rounded-2xl bg-[var(--color-accent)] py-3 text-sm font-semibold text-white shadow-md transition-[transform,filter,opacity] hover:brightness-110 active:scale-[0.98] disabled:cursor-not-allowed disabled:bg-gray-400 disabled:text-white/90 disabled:opacity-70 disabled:shadow-none disabled:hover:brightness-100 motion-reduce:active:scale-100"
+      >
+        {publicBusy ? <Loader2 className="h-4 w-4 shrink-0 animate-spin" aria-hidden /> : null}
+        Create public link
+      </button>
+      {publicLinksLoading ? (
+        <p className="text-xs text-gray-500">Loading public links…</p>
+      ) : publicLinksError ? (
+        <p className="text-xs font-medium text-amber-800 dark:text-amber-200">{publicLinksError}</p>
+      ) : publicLinks.length > 0 ? (
+        <ul className="flex flex-col gap-2 border-t border-[var(--glass-border)] pt-3 text-xs">
+          {publicLinks.map((row) => (
+            <li
+              key={row.id}
+              className="flex items-start justify-between gap-2 rounded-xl border border-[var(--glass-border)] bg-black/[0.02] px-3 py-2 dark:bg-white/[0.04]"
+            >
+              <div className="min-w-0">
+                <p className="font-medium text-[var(--color-text)]">
+                  {row.active ? "Active" : row.revokedAt ? "Revoked" : "Expired"}
+                </p>
+                <p className="text-gray-500 dark:text-gray-400">
+                  {row.expiresAt == null ? "No expiry" : `Expires ${new Date(row.expiresAt).toLocaleString()}`}
+                </p>
+                <p className="text-[10px] text-gray-400">Created {new Date(row.createdAt).toLocaleString()}</p>
+              </div>
+              {row.active ? (
+                <button
+                  type="button"
+                  title="Revoke link"
+                  disabled={publicBusy}
+                  onClick={() => void revokePublic(row.id)}
+                  className="shrink-0 rounded-lg p-2 text-red-600 transition-colors hover:bg-red-500/10 disabled:opacity-40"
+                >
+                  <Trash2 className="h-4 w-4" aria-hidden />
+                </button>
+              ) : null}
+            </li>
+          ))}
+        </ul>
+      ) : null}
+      {publicMsg ? (
+        <p className="rounded-xl border border-[var(--glass-border)] bg-black/[0.03] px-3 py-2 text-xs leading-relaxed text-gray-700 dark:bg-white/[0.06] dark:text-gray-200">
+          {publicMsg}
+        </p>
+      ) : null}
+
+      <div className="border-t border-[var(--glass-border)] pt-5" />
       <div className="flex items-center gap-2 text-sm font-semibold text-[var(--color-text)]">
         <Mail className="h-4 w-4 text-[var(--color-accent)]" />
         Invite by email

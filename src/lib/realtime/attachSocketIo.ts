@@ -1,6 +1,8 @@
 import mongoose from "mongoose";
+import { randomBytes } from "crypto";
 import type { Server } from "socket.io";
 import { verifyRealtimeUserToken } from "./hmacToken";
+import { validatePublicShareTokenForSheet } from "./validatePublicShareToken";
 
 const SheetSchema = new mongoose.Schema({}, { strict: false, collection: "sheets" });
 const SheetGrantSchema = new mongoose.Schema({}, { strict: false, collection: "sheetgrants" });
@@ -70,20 +72,42 @@ export function attachSocketIo(io: Server): void {
   const secret = process.env.AUTH_SECRET;
   if (!secret) throw new Error("AUTH_SECRET required for realtime");
 
-  io.use((socket, next) => {
+  io.use(async (socket, next) => {
     console.debug(`> [SOCKET] Incoming connection from: ${socket.handshake.address}`);
     const token = socket.handshake.auth?.token;
-    if (!token || typeof token !== "string") {
-      console.debug("> [SOCKET] Unauthorized: Missing token");
-      return next(new Error("Unauthorized"));
+    const shareToken = socket.handshake.auth?.shareToken;
+    const shareSheetId = socket.handshake.auth?.sheetId;
+
+    if (token && typeof token === "string") {
+      const v = verifyRealtimeUserToken(token, secret);
+      if (!v) {
+        console.debug("> [SOCKET] Unauthorized: Invalid user token");
+        return next(new Error("Unauthorized"));
+      }
+      socket.data.userId = v.userId;
+      socket.data.rtShareViewer = false;
+      return next();
     }
-    const v = verifyRealtimeUserToken(token, secret);
-    if (!v) {
-      console.debug("> [SOCKET] Unauthorized: Invalid token");
-      return next(new Error("Unauthorized"));
+
+    if (shareToken && typeof shareToken === "string" && shareSheetId && typeof shareSheetId === "string") {
+      try {
+        const ok = await validatePublicShareTokenForSheet(shareToken, shareSheetId);
+        if (!ok) {
+          console.debug("> [SOCKET] Unauthorized: Invalid public share token");
+          return next(new Error("Unauthorized"));
+        }
+      } catch (e) {
+        console.debug("> [SOCKET] Share token validation error:", (e as Error)?.message || e);
+        return next(new Error("Unauthorized"));
+      }
+      socket.data.userId = `pub:${randomBytes(12).toString("hex")}`;
+      socket.data.rtShareViewer = true;
+      socket.data.shareSheetId = shareSheetId;
+      return next();
     }
-    socket.data.userId = v.userId;
-    next();
+
+    console.debug("> [SOCKET] Unauthorized: Missing token");
+    return next(new Error("Unauthorized"));
   });
 
   io.on("connection", (socket) => {
@@ -94,6 +118,7 @@ export function attachSocketIo(io: Server): void {
       console.info(`> [SOCKET] Upgraded to transport: ${tr.name}`);
     });
     const userId = socket.data.userId as string;
+    const isShareViewer = Boolean(socket.data.rtShareViewer);
     const name = (socket.handshake.auth?.name as string) || "User";
     const color = (socket.handshake.auth?.color as string) || "#0071E3";
     const image = typeof socket.handshake.auth?.image === "string" ? socket.handshake.auth.image : "";
@@ -179,7 +204,9 @@ export function attachSocketIo(io: Server): void {
     socket.on("joinSheet", async (sheetId: string, ack?: (r: { ok: boolean; error?: string }) => void) => {
       try {
         if (!sheetId || typeof sheetId !== "string") throw new Error("bad id");
-        const ok = await canAccessSheet(userId, sheetId);
+        const ok = isShareViewer
+          ? sheetId === (socket.data.shareSheetId as string)
+          : await canAccessSheet(userId, sheetId);
         if (!ok) throw new Error("forbidden");
         socket.join(`sheet:${sheetId}`);
         socket.data.activeSheet = sheetId;
@@ -293,6 +320,7 @@ export function attachSocketIo(io: Server): void {
     );
 
     socket.on("sheet:scene", (payload: { sheetId?: string; pageId?: string; elements?: unknown; delta?: unknown; files?: unknown }) => {
+      if (isShareViewer) return;
       const { sheetId, pageId, elements, files } = payload || {};
       if (!sheetId || socket.data.activeSheet !== sheetId) return;
       socket.volatile.to(`sheet:${sheetId}`).emit("sheet:scene", {
@@ -307,6 +335,7 @@ export function attachSocketIo(io: Server): void {
     });
 
     socket.on("sheet:editing", (payload: { sheetId?: string }) => {
+      if (isShareViewer) return;
       const sheetId = payload?.sheetId;
       if (!sheetId || socket.data.activeSheet !== sheetId) return;
       const fromSocketId = socket.id;
@@ -355,6 +384,7 @@ export function attachSocketIo(io: Server): void {
     socket.on(
       "sheet:snapshot",
       (payload: { sheetId?: string; snapshot?: unknown; contentVersion?: number }) => {
+        if (isShareViewer) return;
         const { sheetId, snapshot, contentVersion } = payload || {};
         if (!sheetId || socket.data.activeSheet !== sheetId) return;
         socket.to(`sheet:${sheetId}`).emit("sheet:snapshot", {
@@ -369,6 +399,7 @@ export function attachSocketIo(io: Server): void {
     socket.on(
       "rtc:signal",
       (payload: { sheetId?: string; toSocketId?: string; kind?: "offer" | "answer" | "ice"; data?: unknown }) => {
+        if (isShareViewer) return;
         const sheetId = payload?.sheetId;
         const toSocketId = payload?.toSocketId;
         if (!sheetId || !toSocketId || socket.data.activeSheet !== sheetId) return;

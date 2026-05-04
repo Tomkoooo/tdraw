@@ -1,8 +1,8 @@
 # tDraw: Premium iPad-First Note-Taking PWA
 
-> The incredibly fast, absolutely beautiful, and fully self-hostable note-taking Progressive Web App designed purposefully for iPad and Apple Pencil.
+> The incredibly fast, absolutely beautiful, and fully self-hostable note-taking Progressive Web App designed purposefully for iPad and Apple Pencil — with an optional **Capacitor** native shell for iOS and Android when you want a store-ready or MDM-distributed build.
 
-tDraw is a clean, minimalist notebook application with **sharing**, **organizations**, **folders**, **tasks & calendar**, **live collaboration**, and **per-user toolbar customization**. Your notes stay yours, with strict access checks on every server action and realtime join.
+tDraw is a clean, minimalist notebook application with **sharing**, **organizations**, **folders**, **tasks & calendar**, **live collaboration**, and **per-user toolbar customization**. Drawing uses **Excalidraw** in the browser or WebView. Your notes stay yours, with strict access checks on every server action and realtime join.
 
 ---
 
@@ -42,7 +42,7 @@ After sign-in you land on a **single-screen dashboard** with segments (**Drive**
 ### Notes & permissions
 
 - **Auto-save** debounces to the server (and broadcasts over Socket.io when the app is running with realtime enabled).
-- **Readers** see the canvas in **view-only** mode (tldraw readonly). **Editors** and **Authors** can draw; **Authors** may invite others if **allow forward share** was granted.
+- **Readers** see the canvas in **view-only** mode (Excalidraw read-only). **Editors** and **Authors** can draw; **Authors** may invite others if **allow forward share** was granted.
 - **Org admins** may delete any sheet in the org (not only their own).
 
 ### Sharing
@@ -54,9 +54,21 @@ After sign-in you land on a **single-screen dashboard** with segments (**Drive**
 
 ### Drawing & toolbar
 
-The canvas is **edge-to-edge**; a **glass card** above the safe area holds **back**, the **title**, optional **page navigation**, then **PDF import**, **PDF export**, **Share**, and **Settings** in a row below. The native **tldraw** tool strip stays at the bottom (pill-shaped, blurred). Chrome **fades while you draw** on the canvas and returns after you lift the pointer. Use the **global calculator** (FAB on the note, or long-press on the canvas in Select/Hand).
+The canvas is **edge-to-edge**; a **glass card** above the safe area holds **back**, the **title**, optional **page navigation**, then **PDF import**, **PDF export**, **Share**, and **Settings** in a row below. **Excalidraw** provides the drawing surface and tool UI at the bottom. Chrome **fades while you draw** on the canvas and returns after you lift the pointer. Use the **global calculator** (FAB on the note, or long-press on the canvas in Select/Hand).
 
-Customize tools under **Settings** (drag order, add/remove).
+Customize the **dashboard hotbar** under **Settings** (drag order, add/remove).
+
+### Apple Pencil, stylus, and native iOS
+
+On the **note Settings** sheet (same glass area as Share / Import), an **Apple Pencil** section appears when you can edit:
+
+- **Double-tap** (Capacitor **iOS** only, via the `pencil-enhanced` plugin): choose **Toggle pen / eraser**, **Undo**, **Handwriting → text** (opens Apple **PencilKit**; inserted as text on the canvas), or **No action**. On web or Android, these controls still persist for when you use a native build.
+- **Write → text**: opens the native handwriting modal on **Capacitor iOS** (same as the handwriting double-tap path).
+- **Scribble erase gesture**: when enabled, a tight zig-zag “scribble” stroke with the pen or mouse can delete intersecting shapes (heuristic; see `src/lib/native/scribbleErase.ts`).
+- **Pencil-only (block finger paint)**: ignores finger down events for painting when you want stylus-first input.
+- **Excalidraw pen mode**: maps drawing to the stylus for better palm rejection alongside iOS system behavior.
+
+Capacitor loads your real app from a **hosted HTTPS URL** when `CAPACITOR_SERVER_URL`, `NEXT_PUBLIC_CAPACITOR_SERVER_URL`, or `NEXTAUTH_URL` is set at sync time (see [`capacitor.config.ts`](capacitor.config.ts)). Without that, the shell only shows the placeholder in [`www/index.html`](www/index.html). Full workflow, Xcode, TestFlight, and auth alignment are in **[`docs/CAPACITOR_IOS.md`](docs/CAPACITOR_IOS.md)** (Android commands are there too; the plugin stubs **PencilEnhanced** on Android until you add Kotlin support).
 
 ### Calculator
 
@@ -179,6 +191,23 @@ docker compose --env-file .env.local up -d --build
 1. Open the site in **Safari**.
 2. Share → **Add to Home Screen**.
 3. Launch from the home screen for a fullscreen experience.
+
+---
+
+## Native apps (Capacitor 6)
+
+Use this when you want an **.ipa** / **.apk** or Xcode-managed debugging while the Next.js app stays the source of truth.
+
+| Step | Command / action |
+|------|------------------|
+| Install deps | `npm install` |
+| Point the WebView at your deployment | Export `CAPACITOR_SERVER_URL=https://your-host` (or rely on `NEXTAUTH_URL` / `NEXT_PUBLIC_CAPACITOR_SERVER_URL` — see [`capacitor.config.ts`](capacitor.config.ts)) |
+| Build the local TS plugin + copy web assets | `npm run cap:sync` (runs `plugin:pencil` then `cap sync`) |
+| Open native IDE | `npm run cap:ios` or `npm run cap:android` |
+
+Keep **NEXTAUTH_URL**, cookies, and **tunnel hosts** in sync with what the WebView loads (`allowedDevOrigins` / `serverActions.allowedOrigins` in `next.config.ts` for dev). The **PencilEnhanced** plugin lives under [`plugins/pencil-enhanced/`](plugins/pencil-enhanced/); native Swift is in `plugins/pencil-enhanced/ios/Plugin/`.
+
+**Details:** [`docs/CAPACITOR_IOS.md`](docs/CAPACITOR_IOS.md) (iOS-focused name; includes Android parity notes).
 
 ---
 
